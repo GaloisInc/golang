@@ -1,0 +1,1 @@
+This is *work in progress*. The parser is still under active development and not feature-complete. We intend to be conformant to the Go specification as of May 31, 2016 and the `golang` compiler where the specification is vague.
