@@ -47,8 +47,6 @@ import Control.Applicative
 import Data.Char (generalCategory, GeneralCategory (..))
 import Data.Generics.Uniplate.Data
 
-type Parser a = ExceptT (SourceRange, String) (StateT ParserState IO) a
-type ParserAnnotation = (SourceRange, Maybe BindingKind)
 
 -- | We don't resolve types for now, so all bindings are typed with this type
 noType = Nil
