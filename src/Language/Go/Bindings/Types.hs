@@ -2,6 +2,8 @@
 
 module Language.Go.Bindings.Types where
 
+import Data.Map.Lazy (Map)
+import qualified Data.Map.Strict as M
 import Data.HashMap.Lazy (HashMap)
 import qualified Data.HashMap.Strict as HM
 --import Language.Go.Types
@@ -28,9 +30,9 @@ data ValueType = Int (Maybe Int32) {- ^ Bitwidth. Architecture-dependent if `Not
                  (Maybe  ValueType) -- ^ Spread parameter
                  [ValueType] -- ^ Return types
                | Array (Maybe (Expression (Maybe Binding))) ValueType
-               | Struct (HashMap Text (ValueType, Maybe Text))
+               | Struct (Map Text (ValueType, Maybe Text))
                | Pointer ValueType
-               | Interface (HashMap Text ValueType)
+               | Interface (Map Text ValueType)
                | Map ValueType ValueType
                | Slice ValueType
                | Channel (ChannelDirection (Maybe Binding)) ValueType
@@ -41,7 +43,7 @@ data ValueType = Int (Maybe Int32) {- ^ Bitwidth. Architecture-dependent if `Not
 data BindingKind = TypeB ValueType
                  | VarB ValueType
                  | ConstB ValueType
-                 | PackageB (Maybe Text) (HashMap Text Binding)
+                 | PackageB (Maybe Text) (Map Text Binding)
                  | FieldOrMethodB ValueType
   deriving (Data, Typeable, Show)
 
