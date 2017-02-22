@@ -38,6 +38,7 @@ data ValueType = Int (Maybe Int32) {- ^ Bitwidth. Architecture-dependent if `Not
                | Channel (ChannelDirection (Maybe Binding)) ValueType
                | BuiltIn Text -- ^ built-in function
                | Alias (TypeName (Maybe Binding))
+               | Tuple [ValueType]
   deriving (Data, Typeable, Show)
 
 data BindingKind = TypeB ValueType
