@@ -114,7 +114,7 @@ data Statement a = DeclStmt a (Declaration a)
                  | BlockStmt a [Statement a]
                  | UnaryAssignStmt a (Expression a) IncDec
                  | AssignStmt a (NonEmpty (Expression a)) AssignOp (NonEmpty (Expression a))
-                 | IfStmt a (Maybe (Statement a)) {- ^guard prefix, a simple statement -}
+                 | IfStmt a (Maybe (Statement a)) {- ^ guard prefix, a simple statement -}
                    (Expression a) {- ^guard -}
                    [Statement a] {- ^then -} [Statement a] {- ^else -}
                  | ExprSwitchStmt a (Maybe (Statement a)) {- ^guard prefix, a simple statement -}
@@ -122,14 +122,14 @@ data Statement a = DeclStmt a (Declaration a)
                  | TypeSwitchStmt a (Maybe (Statement a))  {- ^guard prefix, a simple statement -}
                    (TypeSwitchGuard a) [TypeClause a]
                  | ForStmt a (ForClause a) [Statement a]
-                 | GoStmt a (Expression a) -- ^Go statement: fork a function
-                 | SelectStmt a [CommClause a] -- ^select statement
+                 | GoStmt a (Expression a) -- ^ Go statement: fork a function
+                 | SelectStmt a [CommClause a] -- ^ select statement
                  | BreakStmt a (Maybe (Label a))
                  | ContinueStmt a (Maybe (Label a))
                  | ReturnStmt a [Expression a]
                  | GotoStmt a (Label a)
                  | FallthroughStmt a
-                 | DeferStmt a (Expression a) -- ^Deferred function call
+                 | DeferStmt a (Expression a) -- ^ Deferred function call
                  | ShortVarDeclStmt a (NonEmpty (Id a)) (NonEmpty (Expression a))
                  deriving (Show, Data, Typeable, Functor)
 
