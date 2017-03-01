@@ -55,18 +55,18 @@ runParser :: Parser a -> IO (Either (SourceRange, String) a)
 runParser = (`evalStateT` def) . runExceptT
 
 parseText :: Text -- ^ Text of a file/module
-          -> (Text -> Parser (Package ParserAnnotation))
+          -> (Text -> Parser (Package SourceRange))
           -- ^ A resolver/loader function for imported
           -- modules. Implementations are encouraged to use
           -- `parse`. For an example implementation see
           -- `defaultPackageLoader` and `parsePackage`.
-          -> IO (Either (SourceRange, String) (Package ParserAnnotation))
+          -> IO (Either (SourceRange, String) (Package SourceRange))
 parseText txt loader = runParser $ parse txt loader
 
 parse :: Text -- ^ Text of the program/module
-      -> (Text -> Parser (Package ParserAnnotation))
+      -> (Text -> Parser (Package SourceRange))
       -- ^ A resolver/loader function for imported modules 
-      -> Parser (Package ParserAnnotation)
+      -> Parser (Package SourceRange)
 parse txt loader = (liftHappy $ file $ lexer $ initialInput txt)
                >>= (\f@(File rng _ pname _ _) -> return $ Package rng pname (f :| []))
                >>= transformBiM loadImport
@@ -91,13 +91,13 @@ liftHappy = either throwError return
 
 -- | Infer identifier bindings, types of variables and expressions and
 -- disambiguate expressions
-postprocess :: Package SourceRange -> Parser (Package ParserAnnotation)
-postprocess = (annotateBindings . initBindings) >=> disambiguate
+postprocess :: Package SourceRange -> Parser (Package SourceRange)
+postprocess = annotateBindings >=> disambiguate
 
 --   Based on the semantics of identifiers (in annotations) rewrite expressions:
 --      * FieldSelector with the object part that is a Name. Check if
 --        that Name is a package name. If so, this expression it can
---        be a QualifiedName or QualifiedTypeName.
+--        be a QualifiedName.
 --      * CallExpr with either:
 --        - the length of the arguments list is 1. Check if the
 --          function part is a name which is a named type, or a field
@@ -105,19 +105,20 @@ postprocess = (annotateBindings . initBindings) >=> disambiguate
 --          type conversion.
 --        - the first argument is a Name or a field selector. If so,
 --          that argument can be a named type instead
-disambiguate :: Package ParserAnnotation -> Parser (Package ParserAnnotation)
+disambiguate :: Package SourceRange -> Parser (Package SourceRange)
 disambiguate = transformBiM disambiguateExpression
-  where disambiguateExpression :: Expression ParserAnnotation
-                               -> Parser (Expression ParserAnnotation)
+  where disambiguateExpression :: Expression SourceRange
+                               -> Parser (Expression SourceRange)
         disambiguateExpression e = case e of
-          FieldSelector a (Name na ident) field ->
-            case ident^.ann._2 of
-              Nothing -> unexpected (ident^.ann._1) $ "Unknown identifier " ++ show ident
-              _ -> undefined
+          FieldSelector a (Name na ident) fident@(Id _ _ fname) ->
+            case ident of
+              Id _ bind pname -> case bind^.bindingKind of
+                PackageB _ pexports ->
+                  if HM.member fname pexports then return $ Qualified a ident fident
+                  else unexpected fident $ "Identifier " ++ (T.unpack fname) ++ " not exported from package " ++ (T.unpack pname)
+                _                   -> return e
+              BlankId {}  -> unexpected ident "Reading from a blank identifier"
           _ -> undefined
-
-initBindings :: Package SourceRange -> Package ParserAnnotation
-initBindings = fmap (\rng -> (rng, Nothing))
 
 -- 1) The scope of a predeclared identifier is the universe block.
 -- 2) The scope of an identifier denoting a constant, type, variable,
@@ -138,11 +139,12 @@ initBindings = fmap (\rng -> (rng, Nothing))
 class HasBindings a where
   annotateBindings :: a -> Parser a
   -- ^ Collect the bindings from `a` in the current scope and modify
-  -- annotations on identifiers to reflect the kind of the binding
+  -- binding annotations on identifiers to reflect the kind of the
+  -- binding and the relevant type.
 
 -- | This instance will record only the bindings exported from the
 -- package. 
-instance HasBindings (Package ParserAnnotation) where
+instance HasBindings (Package SourceRange) where
   annotateBindings (Package a pname files) =
     do -- 1. Initialize scope with the predefined type/var bindings
        identifiers .= defaultBindings
@@ -153,7 +155,7 @@ instance HasBindings (Package ParserAnnotation) where
          -- 4. Traverse each file, recording and annotating bindings
          (Package a pname) <$> mapM (annotateFileBindings imports) files
 
-annotateFileBindings :: HashMap Text (HashMap Text Binding) -> File ParserAnnotation -> Parser (File ParserAnnotation)
+annotateFileBindings :: HashMap Text (HashMap Text Binding) -> File SourceRange -> Parser (File SourceRange)
 annotateFileBindings imports f = bracketScope $
   modifyInnerScope (`HM.union` (HM.lookupDefault (HM.empty) (fileName f) imports))
   >> annotateBindings f
@@ -163,7 +165,7 @@ annotateFileBindings imports f = bracketScope $
 -- of the state to reflect that the scope of imports is the file
 -- scope, and the scope of top level declarations is the package
 -- scope.
-collectTopLevelBindings :: File ParserAnnotation
+collectTopLevelBindings :: File SourceRange
                         -> Parser (HashMap Text Binding)
 collectTopLevelBindings (File _ _ _ imports tops)  =
   do oldTopBinds <- getCurrentBindings
@@ -179,11 +181,11 @@ collectTopLevelBindings (File _ _ _ imports tops)  =
      modifyInnerScope (`HM.difference` importbinds)
      return importbinds
 
-instance HasBindings (File ParserAnnotation) where
+instance HasBindings (File SourceRange) where
   annotateBindings (File a fname pname imports topLevels) =
     (File a fname pname imports) <$> mapM annotateFunctions topLevels
-    where annotateFunctions :: TopLevel ParserAnnotation
-                            -> Parser (TopLevel ParserAnnotation)
+    where annotateFunctions :: TopLevel SourceRange
+                            -> Parser (TopLevel SourceRange)
           annotateFunctions tl = case tl of
             FunctionDecl a name params returns mbody ->
               fmap (FunctionDecl a name params returns) $ newScope $
@@ -201,16 +203,16 @@ instance HasBindings (File ParserAnnotation) where
             -- declarations.
             TopDecl {} -> return tl
 
-instance HasBindings (ParameterList ParserAnnotation) where
+instance HasBindings (ParameterList SourceRange) where
   annotateBindings pl = case pl of
     NamedParameterList a nps mrestp -> NamedParameterList a <$> mapM annotateBindings nps <*> (sequence $ annotateBindings <$> mrestp)
     AnonymousParameterList {} -> return pl
 
-instance HasBindings (NamedParameter ParserAnnotation) where
+instance HasBindings (NamedParameter SourceRange) where
   annotateBindings np@(NamedParameter a ident ty) =
     declareBindingIdM ident (VarB noType) >> return np
 
-instance HasBindings (ReturnList ParserAnnotation) where
+instance HasBindings (ReturnList SourceRange) where
   annotateBindings rl = case rl of
     NamedReturnList a nps  -> NamedReturnList a <$> mapM annotateBindings nps
     AnonymousReturnList {} -> return rl
@@ -224,15 +226,15 @@ isExported :: Text -> Binding -> Bool
 isExported n bind | not (bind^.bindingImported) = generalCategory (T.head n) == UppercaseLetter
 isExported _ _                                  = False
   
-topLevelNames :: Package ParserAnnotation -> Parser Bindings
+topLevelNames :: Package SourceRange -> Parser Bindings
 topLevelNames (Package _ _ _) = undefined
   -- do mapM annotateBindings decls
   --    getCurrentBindings
 
-instance HasBindings (ImportDecl ParserAnnotation) where
+instance HasBindings (ImportDecl SourceRange) where
   annotateBindings (ImportDecl a ispecs) = ImportDecl a <$> mapM annotateBindings ispecs
 
-instance HasBindings (TopLevel ParserAnnotation) where
+instance HasBindings (TopLevel SourceRange) where
   annotateBindings tl = case tl of
     FunctionDecl _ fname params returns _ ->
       (VarB <$> ((Function Nothing) <$> getParamTypes params
@@ -247,48 +249,48 @@ instance HasBindings (TopLevel ParserAnnotation) where
       >>= declareBindingIdM mname >> return tl
     TopDecl _ decl -> annotateBindings decl >> return tl
 
-getParamTypes :: ParameterList ParserAnnotation -> Parser [SemanticType]
+getParamTypes :: ParameterList SourceRange -> Parser [SemanticType]
 getParamTypes = undefined
 
-getSpreadType :: ParameterList ParserAnnotation -> Parser (Maybe SemanticType)
+getSpreadType :: ParameterList SourceRange -> Parser (Maybe SemanticType)
 getSpreadType = undefined
 
-getReturnTypes :: ReturnList ParserAnnotation -> Parser [SemanticType]
+getReturnTypes :: ReturnList SourceRange -> Parser [SemanticType]
 getReturnTypes = undefined
 
-getReceiverType :: Receiver ParserAnnotation -> Parser SemanticType
+getReceiverType :: Receiver SourceRange -> Parser SemanticType
 getReceiverType = undefined
                       
-instance HasBindings (Declaration ParserAnnotation) where
+instance HasBindings (Declaration SourceRange) where
   annotateBindings decl = case decl of
     TypeDecl a tspecs -> undefined -- mapM_ annotateBindings tspecs
     
 
-instance HasBindings (TypeSpec ParserAnnotation) where
+instance HasBindings (TypeSpec SourceRange) where
   annotateBindings (TypeSpec _ tid typ) = undefined --annotateBindings typ
                                          -- >> declareBinding Type tid
 
-instance HasBindings (Type ParserAnnotation) where
+instance HasBindings (Type SourceRange) where
   annotateBindings typ = undefined -- case typ of
     -- StructType _ fields ->  mapM_ annotateBindings fields
     -- _                   -> return ()
 
-instance HasBindings (FieldDecl ParserAnnotation) where
+instance HasBindings (FieldDecl SourceRange) where
   annotateBindings decl = undefined -- case decl of
     -- NamedFieldDecl _ ids _ _ -> sequence (NE.map (declareBinding Field) ids)
     --                          >> return ()
     -- _                        -> return ()
 
-instance HasBindings (ImportSpec ParserAnnotation) where
+instance HasBindings (ImportSpec SourceRange) where
   annotateBindings i@(Import _ itype path) =
     lookupImport path >>=
-    \case Nothing -> unexpected (i^.ann._1) $ "Could not find the source for the package \"" ++ show path ++ "\""
+    \case Nothing -> unexpected (i^.ann) $ "Could not find the source for the package \"" ++ show path ++ "\""
           Just prg@(Package _ _ _) ->
             do exports <- newScope $ annotateBindings prg >> getCurrentBindings
                let (package, global) = undefined --HM.foldlWithKey' makeImportBindings (emptyBindings, emptyBindings) exports
                undefined
 
-instance HasBindings (Statement ParserAnnotation) where
+instance HasBindings (Statement SourceRange) where
   annotateBindings = undefined
 
 
@@ -317,8 +319,8 @@ unId (Id _ _ t) = t
 -- | Declare a binding, checking whether it was already declared in
 -- this scope. If the check fails, an appropriate error with a
 -- provided source range will be thrown.
-declareBindingIdM :: Id ParserAnnotation -> BindingKind -> Parser ()
-declareBindingIdM (Id (rng, _) _ ident) bk = declareBindingM ident rng bk
+declareBindingIdM :: Id SourceRange -> BindingKind -> Parser ()
+declareBindingIdM (Id rng _ ident) bk = declareBindingM ident rng bk
 declareBindingIdM (BlankId _)    _  = return ()
 
 declareBindingM :: Ranged r => Text -> r -> BindingKind -> Parser ()
@@ -369,14 +371,14 @@ modifyInnerScope f = do (top :| rest) <- use identifiers
 -- clearBindings :: Parser ()
 -- clearBindings = identifiers .= []
 
-resolveImport :: Text -> (Text -> Parser (Package ParserAnnotation)) -> Parser (Package ParserAnnotation)
+resolveImport :: Text -> (Text -> Parser (Package SourceRange)) -> Parser (Package SourceRange)
 resolveImport path loader = uses modules (HM.lookup path) >>=
   \case (Just p) -> return p
         Nothing  -> do pgm <- loader path
                        lift $ zoom modules $ modify (HM.insert path pgm)
                        return pgm
 
-lookupImport :: Text -> Parser (Maybe (Package ParserAnnotation))
+lookupImport :: Text -> Parser (Maybe (Package SourceRange))
 lookupImport path = liftM (HM.lookup path) $ use modules
 
 -- Default module loading (mimicking the behaviour of the official
@@ -386,16 +388,16 @@ lookupImport path = liftM (HM.lookup path) $ use modules
 --    (e.g. with file names of the format *.go)
 -- 3) Make sure these files have the same package name (throw an error otherwise)
 -- 4) Parse each file in sequence and catenate them 
-defaultPackageLoader :: FilePath -> Parser (Package ParserAnnotation)
+defaultPackageLoader :: FilePath -> Parser (Package SourceRange)
 defaultPackageLoader path = ExceptT $ lift $ loader
-  where loader :: IO (Either (SourceRange, String) (Package ParserAnnotation))
+  where loader :: IO (Either (SourceRange, String) (Package SourceRange))
         loader = lookupEnv "GOPATH" >>=
           \case Nothing     -> return $ Left (fakeRange, "GOPATH environment variable is not declared. Can't load modules without it.")
                 Just gopath -> let modulePath = gopath </> path
                                in  liftM (bimap (fakeRange,) id) $ parsePackage modulePath
                  
 -- | Parse a file using the default imported module loader.
-parseFile :: FilePath -> IO (Either String (Package ParserAnnotation))
+parseFile :: FilePath -> IO (Either String (Package SourceRange))
 parseFile fp = do moduleText <- liftIO $ readFile fp
                   liftM (bimap (\err -> "Parse error at " ++ show (fst err) ++ ": " ++ snd err) id) $ parseText moduleText (defaultPackageLoader . unpack)
 
@@ -403,7 +405,7 @@ parseFile fp = do moduleText <- liftIO $ readFile fp
 -- argument is the directory path that contains the module source
 -- files. It is an absolute path, e.g. not relative to the 'GOPATH'
 -- environment variable.
-parsePackage :: FilePath -> IO (Either String (Package ParserAnnotation))
+parsePackage :: FilePath -> IO (Either String (Package SourceRange))
 parsePackage path = -- TODO: catch the exceptions from IO functions and
               -- convert them to ExceptT error messages for uniform
               -- interface

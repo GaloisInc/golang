@@ -19,7 +19,7 @@ import Language.Go.Bindings.Types
 import Control.Monad.State.Strict
 import Control.Monad.Except
 
-data ParserState = ParserState {_modules :: HashMap Text (Package (SourceRange, Maybe BindingKind))
+data ParserState = ParserState {_modules :: HashMap Text (Package SourceRange)
                                ,_identifiers :: Bindings
                                }
 
