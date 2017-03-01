@@ -59,6 +59,13 @@ module Language.Go.AST (SourceRange (..)
                        ,BinaryOp (..)
                        ,UnaryOp (..)
                        ,Id (..)
+                       ,Binding(..)
+                       ,bindingImported
+                       ,bindingKind
+                       ,bindingDeclLoc
+                       ,bindingThisScope
+                       ,BindingKind(..)
+                       ,ValueType (..)
                        ,ann
                        ,Annotated) where
 
@@ -74,6 +81,7 @@ import Data.Either (Either)
 import Language.Annotated
 import Data.Semigroup
 import AlexTools (SourceRange(..), SourcePos (..))
+import Data.Map (Map)
 
 data Package a = Package a Text {- package name -} (NonEmpty (File a))
   deriving (Show, Data, Typeable, Functor)
@@ -233,7 +241,7 @@ data NamedParameter a = NamedParameter a (Id a) (Type a)
 type AnonymousParameter = Type
 
 -- | Identifiers
-data Id a = Id a Text -- ^are either names
+data Id a = Id a Binding Text -- ^are either names
           | BlankId a -- ^or blank ("_")
   deriving (Show, Data, Typeable, Functor)
 
@@ -251,7 +259,7 @@ data Tag a = Tag a Text
   deriving (Show, Data, Typeable, Functor)
 
 -- | Method specification
-data MethodSpec a = Method a (Id a) (ParameterList a) (ReturnList a) | Interface a (TypeName a)
+data MethodSpec a = MethodSpec a (Id a) (ParameterList a) (ReturnList a) | InterfaceSpec a (TypeName a)
   deriving (Show, Data, Typeable, Functor)
 
 data ChannelDirection a = Send a | Recv a | Duplex a
@@ -305,6 +313,45 @@ deriving instance Data SourceRange
 deriving instance Typeable SourceRange
 deriving instance Data SourcePos
 deriving instance Typeable SourcePos
+
+data ValueType = Int (Maybe Int) {- ^ Bitwidth. Architecture-dependent if `Nothing` -} Bool {- ^ Signed? -}
+               | Boolean
+               | Float Int {- ^ Bitwidth -}
+               | Complex Int  {- ^ Bitwidth -}
+               | Iota
+               | Nil
+               | String
+               | Function (Maybe ValueType) -- ^ Method receiver type
+                 [ValueType] -- ^ Parameter types
+                 (Maybe  ValueType) -- ^ Spread parameter
+                 [ValueType] -- ^ Return types
+               | Array (Maybe (Expression (Maybe Binding))) ValueType
+               | Struct (Map Text (ValueType, Maybe Text))
+               | Pointer ValueType
+               | Interface (Map Text ValueType)
+               | Map ValueType ValueType
+               | Slice ValueType
+               | Channel (ChannelDirection (Maybe Binding)) ValueType
+               | BuiltIn Text -- ^ built-in function
+               | Alias (TypeName (Maybe Binding))
+               | Tuple [ValueType]
+  deriving (Data, Typeable, Show)
+
+data BindingKind = TypeB ValueType
+                 | VarB ValueType
+                 | ConstB ValueType
+                 | PackageB (Maybe Text) (Map Text Binding)
+                 | FieldOrMethodB ValueType
+  deriving (Data, Typeable, Show)
+
+data Binding = Binding {_bindingDeclLoc :: SourceRange
+                       ,_bindingKind :: BindingKind
+                       ,_bindingImported :: Bool
+                       ,_bindingThisScope :: Bool
+                       }
+  deriving (Data, Typeable, Show)
+
+makeLenses ''Binding
 
 makeAnnotationLenses [''Package
                      ,''File

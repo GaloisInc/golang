@@ -214,7 +214,7 @@ revNonEmptyExprList :: {NonEmpty (Expression SourceRange)}
 
 identifier :: {Id SourceRange}
   : ident {if getIdent $1 == T.singleton '_' then pos $1 BlankId
-           else pos $1 Id (getIdent $1)
+           else pos $1 Id undefined (getIdent $1)
           }
 
 optidentifier :: {Maybe (Id SourceRange)}
@@ -342,8 +342,8 @@ channeldir :: {ChannelDirection SourceRange}
 methodspec :: {MethodSpec SourceRange}
   : identifier msrest {
        case $2 of {
-          Left (params, returns) -> pos ($1, returns) Method $1 params returns ;
-          Right mid -> pos ($1, mid) (\p -> Interface p (TypeName p (fmap (const $1) mid) (fromMaybe $1 mid)))
+          Left (params, returns) -> pos ($1, returns) MethodSpec $1 params returns ;
+          Right mid -> pos ($1, mid) (\p -> InterfaceSpec p (TypeName p (fmap (const $1) mid) (fromMaybe $1 mid)))
        }
     }
 

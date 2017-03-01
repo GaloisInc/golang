@@ -305,7 +305,7 @@ makeImportBindings = undefined
 --                         (ImportedQualifiedB (fromMaybe pname mpiname) n, kr)
 
 unId :: Id a -> Text
-unId (Id _ t) = t 
+unId (Id _ _ t) = t 
             
 -- filterExported
 --  An identifier may be exported to permit access to it from another package. An identifier is exported if both:
@@ -318,7 +318,7 @@ unId (Id _ t) = t
 -- this scope. If the check fails, an appropriate error with a
 -- provided source range will be thrown.
 declareBindingIdM :: Id ParserAnnotation -> BindingKind -> Parser ()
-declareBindingIdM (Id (rng, _) ident) bk = declareBindingM ident rng bk
+declareBindingIdM (Id (rng, _) _ ident) bk = declareBindingM ident rng bk
 declareBindingIdM (BlankId _)    _  = return ()
 
 declareBindingM :: Ranged r => Text -> r -> BindingKind -> Parser ()
