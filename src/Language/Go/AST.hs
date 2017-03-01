@@ -65,7 +65,7 @@ module Language.Go.AST (SourceRange (..)
                        ,bindingDeclLoc
                        ,bindingThisScope
                        ,BindingKind(..)
-                       ,ValueType (..)
+                       ,SemanticType (..)
                        ,ann
                        ,Annotated) where
 
@@ -314,34 +314,34 @@ deriving instance Typeable SourceRange
 deriving instance Data SourcePos
 deriving instance Typeable SourcePos
 
-data ValueType = Int (Maybe Int) {- ^ Bitwidth. Architecture-dependent if `Nothing` -} Bool {- ^ Signed? -}
+data SemanticType = Int (Maybe Int) {- ^ Bitwidth. Architecture-dependent if `Nothing` -} Bool {- ^ Signed? -}
                | Boolean
-               | Float Int {- ^ Bitwidth -}
-               | Complex Int  {- ^ Bitwidth -}
+               | Float (Maybe Int) {- ^ Bitwidth, if nothing it's an "untyped constant" -}
+               | Complex (Maybe Int)  {- ^ Bitwidth, if nothing it's an "untyped constant" -}
                | Iota
                | Nil
                | String
-               | Function (Maybe ValueType) -- ^ Method receiver type
-                 [ValueType] -- ^ Parameter types
-                 (Maybe  ValueType) -- ^ Spread parameter
-                 [ValueType] -- ^ Return types
-               | Array (Maybe (Expression (Maybe Binding))) ValueType
-               | Struct (Map Text (ValueType, Maybe Text))
-               | Pointer ValueType
-               | Interface (Map Text ValueType)
-               | Map ValueType ValueType
-               | Slice ValueType
-               | Channel (ChannelDirection (Maybe Binding)) ValueType
-               | BuiltIn Text -- ^ built-in function
+               | Function (Maybe SemanticType) -- ^ Method receiver type
+                 [SemanticType] -- ^ Parameter types
+                 (Maybe  SemanticType) -- ^ Spread parameter
+                 [SemanticType] -- ^ Return types
+               | Array (Maybe (Expression (Maybe Binding))) SemanticType
+               | Struct (Map Text (SemanticType, Maybe Text))
+               | Pointer SemanticType
+               | Interface (Map Text SemanticType)
+               | Map SemanticType SemanticType
+               | Slice SemanticType
+               | Channel (ChannelDirection (Maybe Binding)) SemanticType
                | Alias (TypeName (Maybe Binding))
-               | Tuple [ValueType]
+               | Tuple [SemanticType]
+               | BuiltIn Text
   deriving (Data, Typeable, Show)
 
-data BindingKind = TypeB ValueType
-                 | VarB ValueType
-                 | ConstB ValueType
+data BindingKind = TypeB SemanticType
+                 | VarB SemanticType
+                 | ConstB SemanticType
                  | PackageB (Maybe Text) (Map Text Binding)
-                 | FieldOrMethodB ValueType
+                 | FieldOrMethodB SemanticType
   deriving (Data, Typeable, Show)
 
 data Binding = Binding {_bindingDeclLoc :: SourceRange

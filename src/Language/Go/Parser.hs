@@ -247,16 +247,16 @@ instance HasBindings (TopLevel ParserAnnotation) where
       >>= declareBindingIdM mname >> return tl
     TopDecl _ decl -> annotateBindings decl >> return tl
 
-getParamTypes :: ParameterList ParserAnnotation -> Parser [ValueType]
+getParamTypes :: ParameterList ParserAnnotation -> Parser [SemanticType]
 getParamTypes = undefined
 
-getSpreadType :: ParameterList ParserAnnotation -> Parser (Maybe ValueType)
+getSpreadType :: ParameterList ParserAnnotation -> Parser (Maybe SemanticType)
 getSpreadType = undefined
 
-getReturnTypes :: ReturnList ParserAnnotation -> Parser [ValueType]
+getReturnTypes :: ReturnList ParserAnnotation -> Parser [SemanticType]
 getReturnTypes = undefined
 
-getReceiverType :: Receiver ParserAnnotation -> Parser ValueType
+getReceiverType :: Receiver ParserAnnotation -> Parser SemanticType
 getReceiverType = undefined
                       
 instance HasBindings (Declaration ParserAnnotation) where

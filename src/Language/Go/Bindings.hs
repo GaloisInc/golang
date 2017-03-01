@@ -3,7 +3,6 @@
 -- | Identifier bindings and operations on them
 module Language.Go.Bindings where
 
-import Language.Go.Types
 import Data.Text (Text)
 import Data.HashMap.Lazy (HashMap)
 import qualified Data.HashMap.Strict as HM
@@ -11,7 +10,7 @@ import AlexTools hiding (range)
 import Lens.Simple hiding ((&))
 import Control.Arrow
 import Language.Go.Parser.Util
-import Language.Go.AST (Id(..), Type(..), TypeName(..))
+import Language.Go.AST (Id(..), Type(..), TypeName(..), BindingKind (..), Binding (..), SemanticType (..))
 import Data.List.NonEmpty (NonEmpty(..), (<|), nonEmpty)
 import qualified Data.List.NonEmpty as NE
 import Data.Default.Class
@@ -59,22 +58,25 @@ predeclaredBindings = HM.fromList $ map (second $ \k -> Binding fakeRange k True
   ,("int16", TypeB $ Int (Just 16) True)
   ,("int32", TypeB $ Int (Just 32) True)
   ,("int64", TypeB $ Int (Just 64) True)
-  ,("float32", TypeB $ Float 32)
-  ,("float64", TypeB $ Float 64)
-  ,("complex64", TypeB $ Complex 64)
-  ,("complex128", TypeB $ Complex 128)
+  ,("float32", TypeB $ Float (Just 32))
+  ,("float64", TypeB $ Float (Just 64))
+  ,("complex64", TypeB $ Complex (Just 64))
+  ,("complex128", TypeB $ Complex (Just 128))
   ,("byte", TypeB $ Int (Just 8) False)
-  ,("rune", TypeB $ Int (Just 32) True)
+  ,("bool", TypeB $ Boolean)
+  ,("rune", TypeB runeType)
   ,("uint", TypeB $ Int (Just 32) False)
   ,("int", TypeB $ Int Nothing True)
   ,("uintptr", TypeB $ Int (Just 64) False)
   ,("string", TypeB String)
-  ,("iota", ConstB Iota)
+  ,("iota", ConstB $ Int Nothing False)
   ,("nil", ConstB Nil)
-  ,("true", ConstB Boolean)
+  ,("true", ConstB  Boolean)
   ,("false", ConstB Boolean)
   ]
   ++ map (id &&& (ConstB . BuiltIn))
   ["append", "cap", "close", "complex", "copy", "delete", "imag", "len", "make",
    "new", "panic", "print", "println", "real", "recover"
   ]
+
+runeType = Int (Just 32) True
