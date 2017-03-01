@@ -12,6 +12,7 @@ import Data.Typeable (Typeable)
 import Language.Go.Bindings.Types
 import Data.Generics.Uniplate.Data
 import Language.Go.Bindings
+import Lens.Simple
 
 class Typed a where
   getType :: a -> SemanticType
@@ -23,7 +24,16 @@ instance Typed (Expression a) where
     ImaginaryLit {} -> Complex Nothing
     RuneLit {} -> runeType
     StringLit {} -> String
-    _ -> undefined
+    Name _ (Id _ bind _) -> case bind^.bindingKind of
+                              VarB st -> st
+                              ConstB st -> st
+                              _       -> error "An identifier is used as a variable, but not bound to a value"
+    Qualified _ _ (Id _ bind _) ->
+      case bind^.bindingKind of
+        VarB st -> st
+        ConstB st -> st
+        _       -> error "An identifier is used as a variable, but not bound to a value"
+    _ -> error "Expression not supported"
 
 instance Typed (Type a) where
   getType t = case t of
