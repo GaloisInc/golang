@@ -31,12 +31,19 @@ import Data.Maybe (fromJust)
 
 defaultBindings = predeclaredBindings :| []
 
-declareBindingId :: Id SourceRange -> BindingKind -> Bindings -> Bindings
-declareBindingId (BlankId _) _ = id
-declareBindingId id@(Id _ _ ident) bk = declareBinding ident id bk
+-- declareBindingId :: Id SourceRange -> BindingKind -> Bindings -> Bindings
+-- declareBindingId (BlankId _) _ = id
+-- declareBindingId id@(Id _ _ ident) bk = declareBinding ident 
 
-declareBinding :: Ranged r => Text -> r -> BindingKind -> Bindings -> Bindings
-declareBinding ident r bk (b :| bs) = HM.insert ident (Binding (range r) bk False True) b :| bs
+mkBinding :: Ranged r => Text -> r -> BindingKind -> Binding
+mkBinding n r bk = Binding {_bindingDeclLoc = range r
+                           ,_bindingKind = bk
+                           ,_bindingImported = False
+                           ,_bindingThisScope = True
+                           }
+
+declareBinding :: Text -> Binding -> Bindings -> Bindings
+declareBinding ident bind (b :| bs) = HM.insert ident bind b :| bs
 
 lookupBinding :: Text -> Bindings -> Maybe BindingKind
 lookupBinding id (b :| _) = _bindingKind <$> HM.lookup id b

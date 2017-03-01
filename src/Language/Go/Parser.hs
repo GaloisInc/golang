@@ -317,22 +317,26 @@ unId (Id _ _ t) = t
 -- Each package has a package block containing all Go source text for that package.
 
 -- | Declare a binding, checking whether it was already declared in
--- this scope. If the check fails, an appropriate error with a
--- provided source range will be thrown.
-declareBindingIdM :: Id SourceRange -> BindingKind -> Parser ()
-declareBindingIdM (Id rng _ ident) bk = declareBindingM ident rng bk
-declareBindingIdM (BlankId _)    _  = return ()
+-- this scope, and also recording it in the identifire. If the check
+-- fails, an appropriate error with a provided source range will be
+-- thrown.
+declareBindingIdM :: Id SourceRange -> BindingKind -> Parser (Id SourceRange)
+declareBindingIdM (Id rng _ ident) bk =
+  let bind = mkBinding ident rng bk in
+  declareBindingM ident bind >> return (Id rng bind ident)
+declareBindingIdM ident@(BlankId _)    _  = return ident
 
-declareBindingM :: Ranged r => Text -> r -> BindingKind -> Parser ()
-declareBindingM name r bk =
+
+declareBindingM :: Text -> Binding -> Parser ()
+declareBindingM name b =
   do mbind <- uses identifiers (HM.lookup name . fst . NE.uncons)
      case mbind of
        Just prev -> if prev^.bindingThisScope then
-                      unexpected r $ "Duplicate declaration for " ++
+                      unexpected (b^.bindingDeclLoc) $ "Duplicate declaration for " ++
                       show name ++ ". Previous declaration at " ++
                       show (prev^.bindingDeclLoc)
-                    else identifiers %= declareBinding name r bk
-       Nothing -> identifiers %= declareBinding name r bk
+                    else identifiers %= declareBinding name b
+       Nothing -> identifiers %= declareBinding name b
 
 -- | Look up the binding kind of an identifier. If the identifier is
 -- not found, fail with an error.
