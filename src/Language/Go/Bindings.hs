@@ -69,7 +69,7 @@ predeclaredBindings = HM.fromList $ map (second $ \k -> Binding fakeRange k True
   ,("int", TypeB $ Int Nothing True)
   ,("uintptr", TypeB $ Int (Just 64) False)
   ,("string", TypeB String)
-  ,("iota", ConstB $ Int Nothing False)
+  ,("iota", ConstB Iota)
   ,("nil", ConstB Nil)
   ,("true", ConstB  Boolean)
   ,("false", ConstB Boolean)
