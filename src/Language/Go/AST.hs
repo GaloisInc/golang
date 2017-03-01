@@ -82,6 +82,7 @@ import Language.Annotated
 import Data.Semigroup
 import AlexTools (SourceRange(..), SourcePos (..))
 import Data.Map (Map)
+import Data.HashMap.Lazy (HashMap)
 
 data Package a = Package a Text {- package name -} (NonEmpty (File a))
   deriving (Show, Data, Typeable, Functor)
@@ -340,7 +341,7 @@ data SemanticType = Int (Maybe Int) {- ^ Bitwidth. Architecture-dependent if `No
 data BindingKind = TypeB SemanticType
                  | VarB SemanticType
                  | ConstB SemanticType
-                 | PackageB (Maybe Text) (Map Text Binding)
+                 | PackageB (Maybe Text) (HashMap Text Binding)
                  | FieldOrMethodB SemanticType
   deriving (Data, Typeable, Show)
 
