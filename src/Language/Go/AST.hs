@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable, DeriveFunctor, MultiParamTypeClasses, LambdaCase, FlexibleInstances, TemplateHaskell, StandaloneDeriving #-}
+{-# LANGUAGE DeriveDataTypeable, DeriveFunctor, DeriveTraversable, MultiParamTypeClasses, LambdaCase, FlexibleInstances, TemplateHaskell, StandaloneDeriving #-}
 -- | The grammar of Go has the unfortunate property of having
 -- non-nested overlapping categories: that is categories that have
 -- both common and different elements. The examples of this are 1)
@@ -67,11 +67,13 @@ module Language.Go.AST (SourceRange (..)
                        ,BindingKind(..)
                        ,SemanticType (..)
                        ,ann
-                       ,Annotated) where
+                       ,Annotated
+                       ,reannotate) where
 
 import Data.Data (Data)
 import Data.Data (Typeable)
 import Data.Text (Text)
+import Data.Traversable (Traversable)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
 import Control.Monad
@@ -85,19 +87,19 @@ import Data.Map (Map)
 import Data.HashMap.Lazy (HashMap)
 
 data Package a = Package a Text {- package name -} (NonEmpty (File a))
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 data File a = File a Text {- File name -} Text {- package name -} [ImportDecl a] [TopLevel a]
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 fileName :: File a -> Text
 fileName (File _ fname _ _ _ ) = fname
 
 data ImportDecl a = ImportDecl a [ImportSpec a]
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 data ImportSpec a = Import a ImportType Path
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 data ImportType = ImportAll
                 | ImportQualified (Maybe Text)
@@ -108,12 +110,12 @@ type Path = Text
 data Declaration a = TypeDecl a [TypeSpec a]
                    | ConstDecl a [ConstSpec a]
                    | VarDecl a [VarSpec a]
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 data TopLevel a = FunctionDecl a (Id a) (ParameterList a) (ReturnList a) (Maybe [Statement a])
                 | MethodDecl a (Receiver a) (Id a) (ParameterList a) (ReturnList a) (Maybe [Statement a])
                 | TopDecl a (Declaration a)
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 data Statement a = DeclStmt a (Declaration a)
                  | ExpressionStmt a (Expression a)
@@ -140,7 +142,7 @@ data Statement a = DeclStmt a (Declaration a)
                  | FallthroughStmt a
                  | DeferStmt a (Expression a) -- ^ Deferred function call
                  | ShortVarDeclStmt a (NonEmpty (Id a)) (NonEmpty (Expression a))
-                 deriving (Show, Data, Typeable, Functor)
+                 deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Increment or decrement operation
 data IncDec = Inc | Dec
@@ -152,15 +154,15 @@ data AssignOp = Assignment | ComplexAssign BinaryOp
 
 -- | Expression switch statement clause
 data ExprClause a = ExprClause a [Expression a] {- Case values; if empty then it's a default case -} [Statement a]
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Guard of a type switch statement
 data TypeSwitchGuard a = TypeSwitchGuard a (Maybe (Id a)) (Expression a)
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Type switch case clause
 data TypeClause a = TypeClause a [Type a] {- type case values; if empty then it's a default case -} [Statement a]
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | For statement clauses. Note we overload this name from the spec
 -- to also include conditional and range clauses.
@@ -171,35 +173,35 @@ data ForClause a = ForClause a (Maybe (Statement a)) (Maybe (Expression a)) (May
                  -- spec, which is equivalent to a clause without the
                  -- pre- and post-statements.
                  | ForRange a (AssignOrDecl a) (Expression a)
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | An assignment ('=') or declaration ('=') for ForRange and
 -- CommReceive. Because the Functor instance for Either doesn't work for us.
 data AssignOrDecl a = Assign [Expression a]
                     | Decl [Id a]
                     | AODNone
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 
 -- | Communication clause for the select statement
 data CommClause a = CommClause a (CommOp a) {- ^if CommNone, it's a default clause -} [Statement a]
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 data CommOp a = CommSend a (Expression a) (Expression a)
               | CommReceive a (AssignOrDecl a) (Expression a)
               | CommNone a
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 data ConstSpec a = ConstSpec a (NonEmpty (Id a)) (Maybe ((Maybe (Type a)), (NonEmpty (Expression a))))
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 data VarSpec a = TypedVarSpec a (NonEmpty (Id a)) (Type a) [Expression a]
                | UntypedVarSpec a (NonEmpty (Id a)) (NonEmpty (Expression a))
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Type specification
 data TypeSpec a = TypeSpec a (Id a) (Type a)
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Types
 data Type a = NamedType a (TypeName a)
@@ -217,57 +219,57 @@ data Type a = NamedType a (TypeName a)
             -- of its element type.
             | MapType a (Type a) (Type a)
             | ChannelType a (ChannelDirection a) (Type a)
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Named types
 data TypeName a = TypeName a (Maybe (Id a)) -- ^Package id for qualified names
                              (Id a) -- ^Type identifier
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Parameter lists
 data ParameterList a = NamedParameterList a [NamedParameter a] (Maybe (NamedParameter a)) -- ^The last one is the optional variadic parameter
                      | AnonymousParameterList a [AnonymousParameter a] (Maybe (AnonymousParameter a))
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 
 -- | Return lists
 data ReturnList a = NamedReturnList a [NamedParameter a]
                   | AnonymousReturnList a [AnonymousParameter a]
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Named parameters. Unzipped so that identifiers are paired with types. (As opposed to the grammar where every)
 data NamedParameter a = NamedParameter a (Id a) (Type a)
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 type AnonymousParameter = Type
 
 -- | Identifiers
 data Id a = Id a Binding Text -- ^are either names
           | BlankId a -- ^or blank ("_")
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Statement labels
 data Label a = Label a Text
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Field declaration
 data FieldDecl a = NamedFieldDecl a (NonEmpty (Id a)) (Type a) (Maybe (Tag a))
                  | AnonymousFieldDecl a (TypeName a) (Maybe (Tag a))
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
                  
 
 data Tag a = Tag a Text
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Method specification
 data MethodSpec a = MethodSpec a (Id a) (ParameterList a) (ReturnList a) | InterfaceSpec a (TypeName a)
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 data ChannelDirection a = Send a | Recv a | Duplex a
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 data Receiver a = Receiver a (Maybe (Id a)) Bool {- Pointed? -} (TypeName a)
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 data Expression a = IntLit a Integer
                   | FloatLit a Double
@@ -287,16 +289,16 @@ data Expression a = IntLit a Integer
                   | IndexExpr a (Expression a) (Expression a)
                   | SliceExpr a (Expression a) (Maybe (Expression a)) (Maybe (Expression a)) (Maybe (Expression a))
                   | TypeAssertion a (Expression a) (Type a)
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Elements of container literals
 data Element a = Element a (Expression a)
                | KeyedEl a (Key a) (Expression a)
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 data Key a = FieldKey a (Id a)
            | ExprKey a (Expression a)
-  deriving (Show, Data, Typeable, Functor)
+  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
 -- | Binary operators
 data BinaryOp = Add | Subtract | Multiply | Divide | Remainder
@@ -332,8 +334,8 @@ data SemanticType = Int (Maybe Int) {- ^ Bitwidth. Architecture-dependent if `No
                | Interface (Map Text SemanticType)
                | Map SemanticType SemanticType
                | Slice SemanticType
-               | Channel (ChannelDirection (Maybe Binding)) SemanticType
-               | Alias (TypeName (Maybe Binding))
+               | Channel (ChannelDirection ()) SemanticType
+               | Alias (TypeName ())
                | Tuple [SemanticType]
                | BuiltIn Text
   deriving (Data, Typeable, Show)
@@ -351,6 +353,11 @@ data Binding = Binding {_bindingDeclLoc :: SourceRange
                        ,_bindingThisScope :: Bool
                        }
   deriving (Data, Typeable, Show)
+
+-- | Changes all the labels in the tree to another one, given by a
+-- function.
+reannotate :: Traversable t => (a -> b) -> t a -> t b
+reannotate f tree = traverse (pure . f) tree ()
 
 makeLenses ''Binding
 

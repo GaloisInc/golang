@@ -1,6 +1,6 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 -- | 'Resolved' type representations and inference/checking
-module Language.Go.Types (SemanticType(..), Binding(..), BindingKind(..), Typed, defaultType) where
+module Language.Go.Types (SemanticType(..), Binding(..), BindingKind(..), Typed(..), getType, defaultType) where
 
 import Data.Int
 import Language.Go.AST
@@ -38,6 +38,13 @@ instance Typed (Expression a) where
 instance Typed (Type a) where
   getType t = case t of
     _ -> undefined
+
+instance Typed (NamedParameter a) where
+  getType (NamedParameter _ _ ty) = getType ty
+
+instance Typed (Receiver a) where
+  getType (Receiver _ _ pointed tn) =
+    let tnt = Alias (reannotate (const ()) tn) in if pointed then Pointer tnt else tnt
 
 -- | Coerce a possible type to a storable type; see spec "Constants":
 -- "The default type of an untyped constant is bool, rune, int,

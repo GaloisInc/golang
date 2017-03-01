@@ -210,7 +210,7 @@ instance HasBindings (ParameterList SourceRange) where
 
 instance HasBindings (NamedParameter SourceRange) where
   annotateBindings np@(NamedParameter a ident ty) =
-    declareBindingIdM ident (VarB noType) >> return np
+    liftM (\i -> NamedParameter a i ty) $ declareBindingIdM ident (VarB noType) 
 
 instance HasBindings (ReturnList SourceRange) where
   annotateBindings rl = case rl of
@@ -236,35 +236,42 @@ instance HasBindings (ImportDecl SourceRange) where
 
 instance HasBindings (TopLevel SourceRange) where
   annotateBindings tl = case tl of
-    FunctionDecl _ fname params returns _ ->
+    FunctionDecl a fname params returns body ->
       (VarB <$> ((Function Nothing) <$> getParamTypes params
                                     <*> getSpreadType params
                                     <*> getReturnTypes returns))
-      >>= declareBindingIdM fname >> return tl
-    MethodDecl  _ recv mname params returns _ ->
+      >>= declareBindingIdM fname >>= (\fname' -> return (FunctionDecl a fname' params returns body))
+    MethodDecl  a recv mname params returns body ->
       (VarB <$> (Function <$> (Just <$> getReceiverType recv)
                           <*> getParamTypes params
                           <*> getSpreadType params
                           <*> getReturnTypes returns))
-      >>= declareBindingIdM mname >> return tl
-    TopDecl _ decl -> annotateBindings decl >> return tl
+      >>= declareBindingIdM mname >>= (\mname' -> return (MethodDecl a recv mname' params returns body))
+    TopDecl a decl -> TopDecl a <$> annotateBindings decl
 
 getParamTypes :: ParameterList SourceRange -> Parser [SemanticType]
-getParamTypes = undefined
+getParamTypes pl = case pl of
+  NamedParameterList _ nps _ -> return (map getType nps)
+  AnonymousParameterList _ aps _ -> return (map getType aps)
 
 getSpreadType :: ParameterList SourceRange -> Parser (Maybe SemanticType)
-getSpreadType = undefined
+getSpreadType pl = case pl of
+  NamedParameterList _ _ mnp -> return $ getType <$> mnp
+  AnonymousParameterList _ _ manp -> return $ getType <$> manp
 
 getReturnTypes :: ReturnList SourceRange -> Parser [SemanticType]
-getReturnTypes = undefined
+getReturnTypes rl = case rl of
+  NamedReturnList _ nps -> return $ map getType nps
+  AnonymousReturnList _ aps -> return $ map getType aps
 
 getReceiverType :: Receiver SourceRange -> Parser SemanticType
-getReceiverType = undefined
+getReceiverType = return . getType
                       
 instance HasBindings (Declaration SourceRange) where
   annotateBindings decl = case decl of
-    TypeDecl a tspecs -> undefined -- mapM_ annotateBindings tspecs
-    
+    TypeDecl a tspecs -> TypeDecl a <$> mapM annotateBindings tspecs
+    VarDecl a vspecs -> VarDecl a <$> mapM annotateBindings vspecs
+    ConstDecl a cspecs -> ConstDecl a <$> mapM annotateBindings cspecs
 
 instance HasBindings (TypeSpec SourceRange) where
   annotateBindings (TypeSpec _ tid typ) = undefined --annotateBindings typ
@@ -274,6 +281,17 @@ instance HasBindings (Type SourceRange) where
   annotateBindings typ = undefined -- case typ of
     -- StructType _ fields ->  mapM_ annotateBindings fields
     -- _                   -> return ()
+
+instance HasBindings (VarSpec SourceRange) where
+  annotateBindings vs = case vs of
+    TypedVarSpec a idents ty inits -> undefined
+    UntypedVarSpec a idents inits -> undefined
+
+instance HasBindings (ConstSpec SourceRange) where
+  annotateBindings (ConstSpec a idents mrhs) =
+    case mrhs of
+      Nothing -> undefined
+      Just (mtype, inits) -> undefined
 
 instance HasBindings (FieldDecl SourceRange) where
   annotateBindings decl = undefined -- case decl of
