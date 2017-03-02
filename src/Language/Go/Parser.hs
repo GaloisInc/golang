@@ -237,10 +237,12 @@ instance HasBindings (ImportDecl SourceRange) where
 instance HasBindings (TopLevel SourceRange) where
   annotateBindings tl = case tl of
     FunctionDecl a fname params returns body ->
-      do fname' <- declareBindingIdM fname (VarB $ Function Nothing (getParamTypes params) (getSpreadType params) (getReturnTypes returns))
+      do bk <- VarB <$> (Function Nothing <$> getParamTypes params <*> getSpreadType params <*> getReturnTypes returns)
+         fname' <- declareBindingIdM fname bk
          return (FunctionDecl a fname' params returns body)
     MethodDecl  a recv mname params returns body ->
-      do mname' <- declareBindingIdM mname (VarB $ Function (Just $ getType recv) (getParamTypes params) (getSpreadType params) (getReturnTypes returns))
+      do bk <- VarB <$> (Function <$> (Just <$> getType recv) <*> getParamTypes params <*> getSpreadType params <*> getReturnTypes returns)
+         mname' <- declareBindingIdM mname bk
          return (MethodDecl a recv mname' params returns body)
     TopDecl a decl -> TopDecl a <$> annotateBindings decl
 
@@ -252,16 +254,19 @@ instance HasBindings (Declaration SourceRange) where
 
 instance HasBindings (TypeSpec SourceRange) where
   annotateBindings (TypeSpec a tid typ) = TypeSpec a <$>
-       (declareBindingIdM tid $ TypeB $ getType typ) <*> return typ
+   (TypeB <$> getType typ >>= declareBindingIdM tid) <*> return typ
 
 instance HasBindings (VarSpec SourceRange) where
   annotateBindings vs = case vs of
-    TypedVarSpec a idents ty inits -> TypedVarSpec a <$> mapM (`declareBindingIdM` (VarB $ getType ty)) idents <*> return ty <*> return inits
-    -- ^ TODO check that the inferred types of inits are compatible with ty
+    TypedVarSpec a idents ty inits ->
+      do idents' <- mapM (\ident -> (VarB <$> getType ty) >>= declareBindingIdM ident) idents
+         return $ TypedVarSpec a idents' ty inits
+         -- ^ TODO check that the inferred types of inits are compatible with ty
     UntypedVarSpec a idents inits ->
       if NE.length idents == NE.length inits then
         do inits' <- mapM annotateBindings inits
-           idents' <- mapM (\(ident, init) -> declareBindingIdM ident $ VarB $ getType init) $ NE.zip idents inits'
+           idents' <- mapM (\(ident, init) ->
+                              VarB <$> getType init >>= declareBindingIdM ident) $ NE.zip idents inits'
            return (UntypedVarSpec a idents' inits')
       else unexpected a "The number of initializers does not match the number of variables being declared"
 
