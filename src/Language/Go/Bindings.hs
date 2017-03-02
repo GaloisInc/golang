@@ -45,8 +45,8 @@ mkBinding n r bk = Binding {_bindingDeclLoc = range r
 declareBinding :: Text -> Binding -> Bindings -> Bindings
 declareBinding ident bind (b :| bs) = HM.insert ident bind b :| bs
 
-lookupBinding :: Text -> Bindings -> Maybe BindingKind
-lookupBinding id (b :| _) = _bindingKind <$> HM.lookup id b
+lookupBinding :: Text -> Bindings -> Maybe Binding
+lookupBinding id (b :| _) = HM.lookup id b
 
 pushScope :: Bindings -> Bindings
 pushScope (b :| rest) = (HM.map notThisContext b) :| b:rest

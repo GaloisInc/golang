@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, FlexibleContexts, FlexibleInstances, TupleSections #-}
+{-# LANGUAGE LambdaCase, FlexibleContexts, FlexibleInstances, TupleSections, OverloadedStrings #-}
 module Language.Go.Parser (parsePackage
                           ,parseFile
                           ,SourceRange(..)
@@ -60,17 +60,18 @@ parseText :: Text -- ^ Text of a file/module
           -- modules. Implementations are encouraged to use
           -- `parse`. For an example implementation see
           -- `defaultPackageLoader` and `parsePackage`.
-          -> IO (Either (SourceRange, String) (Package SourceRange))
+          -> IO (Either (SourceRange, String) (File SourceRange))
 parseText txt loader = runParser $ parse txt loader
 
 parse :: Text -- ^ Text of the program/module
       -> (Text -> Parser (Package SourceRange))
       -- ^ A resolver/loader function for imported modules 
-      -> Parser (Package SourceRange)
+      -> Parser (File SourceRange)
 parse txt loader = (liftHappy $ file $ lexer $ initialInput txt)
                >>= (\f@(File rng _ pname _ _) -> return $ Package rng pname (f :| []))
                >>= transformBiM loadImport
                >>= postprocess
+               >>= (\(Package _ _ (f :| [])) -> return f)
   where loadImport :: ImportSpec SourceRange -> Parser (ImportSpec SourceRange)
         loadImport is@(Import _ _ path) = resolveImport path loader >> return is
 
@@ -315,7 +316,29 @@ nonBlankId i = case i of
   BlankId _ -> False
 
 instance HasBindings (Expression SourceRange) where
-  annotateBindings e = undefined
+  annotateBindings e = case e of
+    FunctionLit a params returns body -> undefined
+    CompositeLit a ty els -> CompositeLit a <$> annotateBindings ty <*> mapM annotateBindings els
+    MethodExpr a recv ident -> MethodExpr a <$> annotateBindings recv <*> annotateBindings ident
+    CallExpr a fne mty args mvariadic -> CallExpr a <$> annotateBindings fne <*> annotateBindings mty <*> mapM annotateBindings args <*> sequence (annotateBindings <$> mvariadic)
+    Name a ident -> Name a <$> annotateBindings ident
+    -- ^ TODO Check if ident is bound to a var or const
+    Qualified a qualifier ident -> Qualified a <$> annotateBindings qualifier <*> annotateBindings ident
+    -- ^ TODO Check that qualifier is bound to a package name and
+    -- ident is bound to a var or const exported from it
+    BinaryExpr a op left right -> BinaryExpr a op <$> annotateBindings left <*> annotateBindings right
+    UnaryExpr a op e -> UnaryExpr a op <$> annotateBindings e
+    Conversion a ty e -> Conversion a <$> annotateBindings ty <*> annotateBindings e
+    FieldSelector a e fname -> FieldSelector a <$> annotateBindings e <*> annotateBindings fname
+    IndexExpr a base index -> IndexExpr a <$> annotateBindings base <*> annotateBindings index
+    SliceExpr a base me1 me2 me3 -> SliceExpr a <$> annotateBindings base <*> annotateBindings me1 <*> annotateBindings me2 <*> annotateBindings me3
+    TypeAssertion a e ty -> TypeAssertion a <$> annotateBindings e <*> annotateBindings ty
+
+instance HasBindings a => HasBindings (Maybe a) where
+  annotateBindings = sequence . fmap annotateBindings
+
+instance HasBindings a => HasBindings [a] where
+  annotateBindings = mapM annotateBindings
 
 instance HasBindings (ExprClause SourceRange) where
   annotateBindings = undefined
@@ -326,6 +349,19 @@ instance HasBindings (TypeClause SourceRange) where
 instance HasBindings (CommClause SourceRange) where
   annotateBindings = undefined
 
+instance HasBindings (Type SourceRange) where
+  annotateBindings = undefined
+
+instance HasBindings (Id SourceRange) where
+  annotateBindings i = case i of
+    Id rng _ name -> Id rng <$> (getBinding name rng) <*> pure name
+    BlankId _     -> return i
+
+instance HasBindings (Receiver SourceRange) where
+  annotateBindings = undefined
+
+instance HasBindings (Element SourceRange) where
+  annotateBindings = undefined
 
 makeImportBindings :: (Bindings, Bindings) -> Text -> Binding -> (Bindings, Bindings)
 makeImportBindings = undefined
@@ -373,14 +409,20 @@ declareBindingM name b =
 
 -- | Look up the binding kind of an identifier. If the identifier is
 -- not found, fail with an error.
-getBinding :: Text -> SourceRange -> Parser BindingKind
+getBindingKind :: Text -> SourceRange -> Parser BindingKind
+getBindingKind name rng = view bindingKind <$> getBinding name rng
+
+getBinding :: Text -> SourceRange -> Parser Binding
 getBinding name rng =
   uses identifiers (lookupBinding name) >>=
-  \case Just bk -> return bk
+  \case Just b -> return b
         Nothing -> unexpected rng $ "Unknown identifier " ++ show name
 
+        
+
 lookupBindingIdM :: Id a -> Parser (Maybe BindingKind)
-lookupBindingIdM (Id _ _ name) = uses identifiers $ lookupBinding name
+lookupBindingIdM (Id _ _ name) = do b <- uses identifiers $ lookupBinding name
+                                    return $ fmap (view bindingKind) b
 lookupBindingIdM (BlankId _) = return Nothing
         
 -- | Push a fresh binding context and evaluate the parser in it. Pops
@@ -438,7 +480,7 @@ defaultPackageLoader path = ExceptT $ lift $ loader
                                in  liftM (bimap (fakeRange,) id) $ parsePackage modulePath
                  
 -- | Parse a file using the default imported module loader.
-parseFile :: FilePath -> IO (Either String (Package SourceRange))
+parseFile :: FilePath -> IO (Either String (File SourceRange))
 parseFile fp = do moduleText <- liftIO $ readFile fp
                   liftM (bimap (\err -> "Parse error at " ++ show (fst err) ++ ": " ++ snd err) id) $ parseText moduleText (defaultPackageLoader . unpack)
 
@@ -447,11 +489,13 @@ parseFile fp = do moduleText <- liftIO $ readFile fp
 -- files. It is an absolute path, e.g. not relative to the 'GOPATH'
 -- environment variable.
 parsePackage :: FilePath -> IO (Either String (Package SourceRange))
-parsePackage path = -- TODO: catch the exceptions from IO functions and
-              -- convert them to ExceptT error messages for uniform
-              -- interface
+parsePackage path = -- TODO: catch the exceptions from IO functions
+                    -- and convert them to ExceptT error messages for
+                    -- uniform interface
   listDirectory path >>= \files ->
   let mgoFiles = nonEmpty $ filter ((==) ".go" . takeExtensions) files
   in runExceptT $ case mgoFiles of
        Nothing -> throwError $ "Can't load the module in " ++ path ++ " as it does not have any Go source files."
-       Just goFiles -> undefined -- liftM sconcat $ sequence $ NE.map (ExceptT . parseFile) goFiles
+       Just goFiles -> do (file :| rest) <- mapM (ExceptT . parseFile) goFiles
+                          let (File _ _ pname _ _) = file
+                          return $ Package fakeRange pname (file :| rest)
