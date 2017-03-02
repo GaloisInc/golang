@@ -26,11 +26,11 @@ import Control.Monad.State.Strict
 import Control.Monad.Except
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
-import Data.Maybe (fromMaybe, fromJust)
+import Data.Maybe (fromMaybe, fromJust, isNothing)
 import Control.Monad.Trans (lift)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader
-import Control.Monad (liftM)
+import Control.Monad (liftM, unless)
 import Lens.Simple
 import Data.Default.Class
 import Data.Semigroup
@@ -42,7 +42,7 @@ import qualified Data.List.NonEmpty as NE
 import Data.Traversable
 import Data.Bifunctor
 import Control.Arrow
-import Data.List (foldl')
+import Data.List (foldl', or)
 import Control.Applicative
 import Data.Char (generalCategory, GeneralCategory (..))
 import Data.Generics.Uniplate.Data
@@ -271,6 +271,7 @@ instance HasBindings (VarSpec SourceRange) where
       else unexpected a "The number of initializers does not match the number of variables being declared"
 
 instance HasBindings (ConstSpec SourceRange) where
+  -- TODO: we need to know the context (type) of the previous const specs here
   annotateBindings (ConstSpec a idents mrhs) =
     case mrhs of
       Nothing -> undefined
@@ -292,10 +293,39 @@ instance HasBindings (ImportSpec SourceRange) where
                undefined
 
 instance HasBindings (Statement SourceRange) where
-  annotateBindings = undefined
+  annotateBindings s = case s of
+    ShortVarDeclStmt a idents inits ->
+      do mbks <- mapM lookupBindingIdM $ NE.filter nonBlankId idents
+         let atLeastOneNew = any isNothing mbks
+         unless atLeastOneNew $ unexpected s "Short variable declaration that doesn't declare new variables"
+         unless (NE.length idents == NE.length inits) $ unexpected s "The number of initializers doesn't match the number of variable declared"
+         inits' <- mapM annotateBindings inits
+         idents' <- mapM (\(ident, init) ->
+                            VarB <$> getType init >>= declareBindingIdM ident) $ NE.zip idents inits'
+         return (ShortVarDeclStmt a idents' inits')
+    _ -> descendBiM (annotateBindings :: Declaration SourceRange -> Parser (Declaration SourceRange)) s >>=
+         descendBiM (annotateBindings :: Expression SourceRange -> Parser (Expression SourceRange)) >>=
+         descendBiM (annotateBindings :: ExprClause SourceRange -> Parser (ExprClause SourceRange)) >>=
+         descendBiM (annotateBindings :: TypeClause SourceRange -> Parser (TypeClause SourceRange)) >>=
+         descendBiM (annotateBindings :: CommClause SourceRange -> Parser (CommClause SourceRange)) >>=
+         descendM annotateBindings
+
+nonBlankId i = case i of
+  Id {} -> True
+  BlankId _ -> False
 
 instance HasBindings (Expression SourceRange) where
+  annotateBindings e = undefined
+
+instance HasBindings (ExprClause SourceRange) where
   annotateBindings = undefined
+
+instance HasBindings (TypeClause SourceRange) where
+  annotateBindings = undefined
+
+instance HasBindings (CommClause SourceRange) where
+  annotateBindings = undefined
+
 
 makeImportBindings :: (Bindings, Bindings) -> Text -> Binding -> (Bindings, Bindings)
 makeImportBindings = undefined
@@ -348,6 +378,10 @@ getBinding name rng =
   uses identifiers (lookupBinding name) >>=
   \case Just bk -> return bk
         Nothing -> unexpected rng $ "Unknown identifier " ++ show name
+
+lookupBindingIdM :: Id a -> Parser (Maybe BindingKind)
+lookupBindingIdM (Id _ _ name) = uses identifiers $ lookupBinding name
+lookupBindingIdM (BlankId _) = return Nothing
         
 -- | Push a fresh binding context and evaluate the parser in it. Pops
 -- the context afterwards.
