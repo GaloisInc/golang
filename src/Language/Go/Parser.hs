@@ -237,36 +237,13 @@ instance HasBindings (ImportDecl SourceRange) where
 instance HasBindings (TopLevel SourceRange) where
   annotateBindings tl = case tl of
     FunctionDecl a fname params returns body ->
-      (VarB <$> ((Function Nothing) <$> getParamTypes params
-                                    <*> getSpreadType params
-                                    <*> getReturnTypes returns))
-      >>= declareBindingIdM fname >>= (\fname' -> return (FunctionDecl a fname' params returns body))
+      do fname' <- declareBindingIdM fname (VarB $ Function Nothing (getParamTypes params) (getSpreadType params) (getReturnTypes returns))
+         return (FunctionDecl a fname' params returns body)
     MethodDecl  a recv mname params returns body ->
-      (VarB <$> (Function <$> (Just <$> getReceiverType recv)
-                          <*> getParamTypes params
-                          <*> getSpreadType params
-                          <*> getReturnTypes returns))
-      >>= declareBindingIdM mname >>= (\mname' -> return (MethodDecl a recv mname' params returns body))
+      do mname' <- declareBindingIdM mname (VarB $ Function (Just $ getType recv) (getParamTypes params) (getSpreadType params) (getReturnTypes returns))
+         return (MethodDecl a recv mname' params returns body)
     TopDecl a decl -> TopDecl a <$> annotateBindings decl
 
-getParamTypes :: ParameterList SourceRange -> Parser [SemanticType]
-getParamTypes pl = case pl of
-  NamedParameterList _ nps _ -> return (map getType nps)
-  AnonymousParameterList _ aps _ -> return (map getType aps)
-
-getSpreadType :: ParameterList SourceRange -> Parser (Maybe SemanticType)
-getSpreadType pl = case pl of
-  NamedParameterList _ _ mnp -> return $ getType <$> mnp
-  AnonymousParameterList _ _ manp -> return $ getType <$> manp
-
-getReturnTypes :: ReturnList SourceRange -> Parser [SemanticType]
-getReturnTypes rl = case rl of
-  NamedReturnList _ nps -> return $ map getType nps
-  AnonymousReturnList _ aps -> return $ map getType aps
-
-getReceiverType :: Receiver SourceRange -> Parser SemanticType
-getReceiverType = return . getType
-                      
 instance HasBindings (Declaration SourceRange) where
   annotateBindings decl = case decl of
     TypeDecl a tspecs -> TypeDecl a <$> mapM annotateBindings tspecs
@@ -274,18 +251,19 @@ instance HasBindings (Declaration SourceRange) where
     ConstDecl a cspecs -> ConstDecl a <$> mapM annotateBindings cspecs
 
 instance HasBindings (TypeSpec SourceRange) where
-  annotateBindings (TypeSpec _ tid typ) = undefined --annotateBindings typ
-                                         -- >> declareBinding Type tid
-
-instance HasBindings (Type SourceRange) where
-  annotateBindings typ = undefined -- case typ of
-    -- StructType _ fields ->  mapM_ annotateBindings fields
-    -- _                   -> return ()
+  annotateBindings (TypeSpec a tid typ) = TypeSpec a <$>
+       (declareBindingIdM tid $ TypeB $ getType typ) <*> return typ
 
 instance HasBindings (VarSpec SourceRange) where
   annotateBindings vs = case vs of
-    TypedVarSpec a idents ty inits -> undefined
-    UntypedVarSpec a idents inits -> undefined
+    TypedVarSpec a idents ty inits -> TypedVarSpec a <$> mapM (`declareBindingIdM` (VarB $ getType ty)) idents <*> return ty <*> return inits
+    -- ^ TODO check that the inferred types of inits are compatible with ty
+    UntypedVarSpec a idents inits ->
+      if NE.length idents == NE.length inits then
+        do inits' <- mapM annotateBindings inits
+           idents' <- mapM (\(ident, init) -> declareBindingIdM ident $ VarB $ getType init) $ NE.zip idents inits'
+           return (UntypedVarSpec a idents' inits')
+      else unexpected a "The number of initializers does not match the number of variables being declared"
 
 instance HasBindings (ConstSpec SourceRange) where
   annotateBindings (ConstSpec a idents mrhs) =
@@ -311,6 +289,8 @@ instance HasBindings (ImportSpec SourceRange) where
 instance HasBindings (Statement SourceRange) where
   annotateBindings = undefined
 
+instance HasBindings (Expression SourceRange) where
+  annotateBindings = undefined
 
 makeImportBindings :: (Bindings, Bindings) -> Text -> Binding -> (Bindings, Bindings)
 makeImportBindings = undefined

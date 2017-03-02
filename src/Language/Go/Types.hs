@@ -1,6 +1,6 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 -- | 'Resolved' type representations and inference/checking
-module Language.Go.Types (SemanticType(..), Binding(..), BindingKind(..), Typed(..), getType, defaultType) where
+module Language.Go.Types where
 
 import Data.Int
 import Language.Go.AST
@@ -57,3 +57,22 @@ defaultType = transform concretize
           Float Nothing -> Float (Just 64)
           Complex Nothing -> Complex (Just 128)
           _ -> ct
+
+getParamTypes :: ParameterList SourceRange -> [SemanticType]
+getParamTypes pl = case pl of
+  NamedParameterList _ nps _ -> map getType nps
+  AnonymousParameterList _ aps _ -> map getType aps
+
+getSpreadType :: ParameterList SourceRange -> Maybe SemanticType
+getSpreadType pl = case pl of
+  NamedParameterList _ _ mnp -> getType <$> mnp
+  AnonymousParameterList _ _ manp -> getType <$> manp
+
+getReturnTypes :: ReturnList SourceRange -> [SemanticType]
+getReturnTypes rl = case rl of
+  NamedReturnList _ nps -> map getType nps
+  AnonymousReturnList _ aps -> map getType aps
+
+getReceiverType :: Receiver SourceRange -> SemanticType
+getReceiverType = getType
+                      
