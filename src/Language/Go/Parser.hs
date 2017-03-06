@@ -26,7 +26,7 @@ import Control.Monad.State.Strict
 import Control.Monad.Except
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
-import Data.Maybe (fromMaybe, fromJust, isNothing)
+import Data.Maybe (fromMaybe, fromJust, isNothing, maybeToList)
 import Control.Monad.Trans (lift)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader
@@ -176,16 +176,16 @@ isType (Id _ bind _) = case bind^.bindingKind of
 -- at the identifier in the TypeSpec and ends at the end of the
 -- innermost containing block.
 
-class HasBindings a where
-  annotateBindings :: a -> Parser a
+class Postprocess a where
+  postprocess :: a -> Parser a
   -- ^ Collect the bindings from `a` in the current scope and modify
   -- binding annotations on identifiers to reflect the kind of the
   -- binding and the relevant type.
 
 -- | This instance will record only the bindings exported from the
 -- package. 
-instance HasBindings (Package SourceRange) where
-  annotateBindings (Package a pname files) =
+instance Postprocess (Package SourceRange) where
+  postprocess (Package a pname files) =
     do -- 1. Initialize scope with the predefined type/var bindings
        identifiers .= defaultBindings
        -- 2. with a new scope, for each file
@@ -198,7 +198,7 @@ instance HasBindings (Package SourceRange) where
 annotateFileBindings :: HashMap Text (HashMap Text Binding) -> File SourceRange -> Parser (File SourceRange)
 annotateFileBindings imports f = bracketScope $
   modifyInnerScope (`HM.union` (HM.lookupDefault (HM.empty) (fileName f) imports))
-  >> annotateBindings f
+  >> postprocess f
 
 -- | Adds bindings for the top-level declarations to the
 -- state. Returns the imported declarations. The latter are not part
@@ -210,51 +210,51 @@ collectTopLevelBindings :: File SourceRange
 collectTopLevelBindings (File _ _ _ imports tops)  =
   do oldTopBinds <- getCurrentBindings
      -- 1. Add import bindings,
-     mapM annotateBindings imports
+     mapM postprocess imports
      -- remembering the mapping separately
      newTopBinds <- getCurrentBindings
      let importbinds = HM.difference newTopBinds oldTopBinds
      -- 2. Scan and add top level bindings
-     mapM annotateBindings tops
+     mapM postprocess tops
      -- 3. Remove bindings for package names (difference between the
      -- state and the remembered mapping)
      modifyInnerScope (`HM.difference` importbinds)
      return importbinds
 
-instance HasBindings (File SourceRange) where
-  annotateBindings (File a fname pname imports topLevels) =
+instance Postprocess (File SourceRange) where
+  postprocess (File a fname pname imports topLevels) =
     (File a fname pname imports) <$> mapM annotateFunctions topLevels
     where annotateFunctions :: TopLevel SourceRange
                             -> Parser (TopLevel SourceRange)
           annotateFunctions tl = case tl of
             FunctionDecl a name params returns mbody ->
               fmap (FunctionDecl a name params returns) $ newScope $
-              do annotateBindings params
-                 annotateBindings returns
-                 sequence $ fmap (mapM annotateBindings) mbody
+              do postprocess params
+                 postprocess returns
+                 sequence $ fmap (mapM postprocess) mbody
             MethodDecl a recv name params returns mbody ->
               fmap (MethodDecl a recv name params returns) $ newScope $
-              do annotateBindings params
-                 annotateBindings returns
-                 sequence $ fmap (mapM annotateBindings) mbody
+              do postprocess params
+                 postprocess returns
+                 sequence $ fmap (mapM postprocess) mbody
             -- we have already analysed and recorded bindings from
             -- declarations in `collectTopLevelBindings` and there are
             -- no nested binding scopes in them, so we skip top
             -- declarations.
             TopDecl {} -> return tl
 
-instance HasBindings (ParameterList SourceRange) where
-  annotateBindings pl = case pl of
-    NamedParameterList a nps mrestp -> NamedParameterList a <$> mapM annotateBindings nps <*> (sequence $ annotateBindings <$> mrestp)
+instance Postprocess (ParameterList SourceRange) where
+  postprocess pl = case pl of
+    NamedParameterList a nps mrestp -> NamedParameterList a <$> mapM postprocess nps <*> (sequence $ postprocess <$> mrestp)
     AnonymousParameterList {} -> return pl
 
-instance HasBindings (NamedParameter SourceRange) where
-  annotateBindings np@(NamedParameter a ident ty) =
+instance Postprocess (NamedParameter SourceRange) where
+  postprocess np@(NamedParameter a ident ty) =
     liftM (\i -> NamedParameter a i ty) $ declareBindingIdM ident (VarB noType) 
 
-instance HasBindings (ReturnList SourceRange) where
-  annotateBindings rl = case rl of
-    NamedReturnList a nps  -> NamedReturnList a <$> mapM annotateBindings nps
+instance Postprocess (ReturnList SourceRange) where
+  postprocess rl = case rl of
+    NamedReturnList a nps  -> NamedReturnList a <$> mapM postprocess nps
     AnonymousReturnList {} -> return rl
 
 -- An identifier is exported iff:
@@ -268,14 +268,14 @@ isExported _ _                                  = False
   
 topLevelNames :: Package SourceRange -> Parser Bindings
 topLevelNames (Package _ _ _) = undefined
-  -- do mapM annotateBindings decls
+  -- do mapM postprocess decls
   --    getCurrentBindings
 
-instance HasBindings (ImportDecl SourceRange) where
-  annotateBindings (ImportDecl a ispecs) = ImportDecl a <$> mapM annotateBindings ispecs
+instance Postprocess (ImportDecl SourceRange) where
+  postprocess (ImportDecl a ispecs) = ImportDecl a <$> mapM postprocess ispecs
 
-instance HasBindings (TopLevel SourceRange) where
-  annotateBindings tl = case tl of
+instance Postprocess (TopLevel SourceRange) where
+  postprocess tl = case tl of
     FunctionDecl a fname params returns body ->
       do bk <- VarB <$> (Function Nothing <$> getParamTypes params <*> getSpreadType params <*> getReturnTypes returns)
          fname' <- declareBindingIdM fname bk
@@ -284,123 +284,122 @@ instance HasBindings (TopLevel SourceRange) where
       do bk <- VarB <$> (Function <$> (Just <$> getType recv) <*> getParamTypes params <*> getSpreadType params <*> getReturnTypes returns)
          mname' <- declareBindingIdM mname bk
          return (MethodDecl a recv mname' params returns body)
-    TopDecl a decl -> TopDecl a <$> annotateBindings decl
+    TopDecl a decl -> TopDecl a <$> postprocess decl
 
-instance HasBindings (Declaration SourceRange) where
-  annotateBindings decl = case decl of
-    TypeDecl a tspecs -> TypeDecl a <$> mapM annotateBindings tspecs
-    VarDecl a vspecs -> VarDecl a <$> mapM annotateBindings vspecs
-    ConstDecl a cspecs -> ConstDecl a <$> mapM annotateBindings cspecs
+instance Postprocess (Declaration SourceRange) where
+  postprocess decl = case decl of
+    TypeDecl a tspecs -> TypeDecl a <$> mapM postprocess tspecs
+    VarDecl a vspecs -> VarDecl a <$> mapM postprocess vspecs
+    ConstDecl a cspecs -> ConstDecl a <$> mapM postprocess cspecs
 
-instance HasBindings (TypeSpec SourceRange) where
-  annotateBindings (TypeSpec a tid typ) = TypeSpec a <$>
+instance Postprocess (TypeSpec SourceRange) where
+  postprocess (TypeSpec a tid typ) = TypeSpec a <$>
    (TypeB <$> getType typ >>= declareBindingIdM tid) <*> return typ
 
-instance HasBindings (VarSpec SourceRange) where
-  annotateBindings vs = case vs of
+instance Postprocess (VarSpec SourceRange) where
+  postprocess vs = case vs of
     TypedVarSpec a idents ty inits ->
       do idents' <- mapM (\ident -> (VarB <$> getType ty) >>= declareBindingIdM ident) idents
          return $ TypedVarSpec a idents' ty inits
          -- ^ TODO check that the inferred types of inits are compatible with ty
     UntypedVarSpec a idents inits ->
       if NE.length idents == NE.length inits then
-        do inits' <- mapM annotateBindings inits
+        do inits' <- mapM postprocess inits
            idents' <- mapM (\(ident, init) ->
                               VarB <$> getType init >>= declareBindingIdM ident) $ NE.zip idents inits'
            return (UntypedVarSpec a idents' inits')
       else unexpected a "The number of initializers does not match the number of variables being declared"
 
-instance HasBindings (ConstSpec SourceRange) where
+instance Postprocess (ConstSpec SourceRange) where
   -- TODO: we need to know the context (type) of the previous const specs here
-  annotateBindings (ConstSpec a idents mrhs) =
+  postprocess (ConstSpec a idents mrhs) =
     case mrhs of
       Nothing -> undefined
       Just (mtype, inits) -> undefined
 
-instance HasBindings (FieldDecl SourceRange) where
-  annotateBindings decl = undefined -- case decl of
+instance Postprocess (FieldDecl SourceRange) where
+  postprocess decl = undefined -- case decl of
     -- NamedFieldDecl _ ids _ _ -> sequence (NE.map (declareBinding Field) ids)
     --                          >> return ()
     -- _                        -> return ()
 
-instance HasBindings (ImportSpec SourceRange) where
-  annotateBindings i@(Import _ itype path) =
+instance Postprocess (ImportSpec SourceRange) where
+  postprocess i@(Import _ itype path) =
     lookupImport path >>=
     \case Nothing -> unexpected (i^.ann) $ "Could not find the source for the package \"" ++ show path ++ "\""
           Just prg@(Package _ _ _) ->
-            do exports <- newScope $ annotateBindings prg >> getCurrentBindings
+            do exports <- newScope $ postprocess prg >> getCurrentBindings
                let (package, global) = undefined --HM.foldlWithKey' makeImportBindings (emptyBindings, emptyBindings) exports
                undefined
 
-instance HasBindings (Statement SourceRange) where
-  annotateBindings s = case s of
+instance Postprocess (Statement SourceRange) where
+  postprocess s = case s of
     ShortVarDeclStmt a idents inits ->
       do mbks <- mapM lookupBindingIdM $ NE.filter nonBlankId idents
          let atLeastOneNew = any isNothing mbks
          unless atLeastOneNew $ unexpected s "Short variable declaration that doesn't declare new variables"
          unless (NE.length idents == NE.length inits) $ unexpected s "The number of initializers doesn't match the number of variable declared"
-         inits' <- mapM annotateBindings inits
+         inits' <- mapM postprocess inits
          idents' <- mapM (\(ident, init) ->
                             VarB <$> getType init >>= declareBindingIdM ident) $ NE.zip idents inits'
          return (ShortVarDeclStmt a idents' inits')
-    _ -> descendBiM (annotateBindings :: Declaration SourceRange -> Parser (Declaration SourceRange)) s >>=
-         descendBiM (annotateBindings :: Expression SourceRange -> Parser (Expression SourceRange)) >>=
-         descendBiM (annotateBindings :: ExprClause SourceRange -> Parser (ExprClause SourceRange)) >>=
-         descendBiM (annotateBindings :: TypeClause SourceRange -> Parser (TypeClause SourceRange)) >>=
-         descendBiM (annotateBindings :: CommClause SourceRange -> Parser (CommClause SourceRange)) >>=
-         descendM annotateBindings
+    _ -> descendBiM (postprocess :: Declaration SourceRange -> Parser (Declaration SourceRange)) s >>=
+         descendBiM (postprocess :: Expression SourceRange -> Parser (Expression SourceRange)) >>=
+         descendBiM (postprocess :: ExprClause SourceRange -> Parser (ExprClause SourceRange)) >>=
+         descendBiM (postprocess :: TypeClause SourceRange -> Parser (TypeClause SourceRange)) >>=
+         descendBiM (postprocess :: CommClause SourceRange -> Parser (CommClause SourceRange)) >>=
+         descendM postprocess
 
 nonBlankId i = case i of
   Id {} -> True
   BlankId _ -> False
 
-instance HasBindings (Expression SourceRange) where
-  annotateBindings e = case e of
+instance Postprocess (Expression SourceRange) where
+  postprocess e = case e of
     FunctionLit a params returns body -> undefined
-    CompositeLit a ty els -> CompositeLit a <$> annotateBindings ty <*> mapM annotateBindings els
-    MethodExpr a recv ident -> MethodExpr a <$> annotateBindings recv <*> annotateBindings ident
-    CallExpr a fne mty args mvariadic -> CallExpr a <$> annotateBindings fne <*> annotateBindings mty <*> mapM annotateBindings args <*> sequence (annotateBindings <$> mvariadic)
-    Name a ident -> Name a <$> annotateBindings ident
-    -- ^ TODO Check if ident is bound to a var or const
-    Qualified a qualifier ident -> Qualified a <$> annotateBindings qualifier <*> annotateBindings ident
-    -- ^ TODO Check that qualifier is bound to a package name and
-    -- ident is bound to a var or const exported from it
-    BinaryExpr a op left right -> BinaryExpr a op <$> annotateBindings left <*> annotateBindings right
-    UnaryExpr a op e -> UnaryExpr a op <$> annotateBindings e
-    Conversion a ty e -> Conversion a <$> annotateBindings ty <*> annotateBindings e
-    FieldSelector a e fname -> FieldSelector a <$> annotateBindings e <*> annotateBindings fname
-    IndexExpr a base index -> IndexExpr a <$> annotateBindings base <*> annotateBindings index
-    SliceExpr a base me1 me2 me3 -> SliceExpr a <$> annotateBindings base <*> annotateBindings me1 <*> annotateBindings me2 <*> annotateBindings me3
-    TypeAssertion a e ty -> TypeAssertion a <$> annotateBindings e <*> annotateBindings ty
+    CompositeLit a ty els -> CompositeLit a <$> postprocess ty <*> mapM postprocess els
+    MethodExpr a recv ident -> MethodExpr a <$> postprocess recv <*> postprocess ident
+    CallExpr a fne mty args mvariadic -> CallExpr a <$> postprocess fne <*> postprocess mty <*> mapM postprocess args <*> sequence (postprocess <$> mvariadic)
+    Name a mqualifier ident -> Name a <$> postprocess mqualifier <*> postprocess ident
+    -- ^ TODO Check if ident is bound to a var or const. Check that
+    -- qualifier is bound to a package name and ident is bound to a
+    -- var or const exported from it
+    BinaryExpr a op left right -> BinaryExpr a op <$> postprocess left <*> postprocess right
+    UnaryExpr a op e -> UnaryExpr a op <$> postprocess e
+    Conversion a ty e -> Conversion a <$> postprocess ty <*> postprocess e
+    FieldSelector a e fname -> FieldSelector a <$> postprocess e <*> postprocess fname
+    IndexExpr a base index -> IndexExpr a <$> postprocess base <*> postprocess index
+    SliceExpr a base me1 me2 me3 -> SliceExpr a <$> postprocess base <*> postprocess me1 <*> postprocess me2 <*> postprocess me3
+    TypeAssertion a e ty -> TypeAssertion a <$> postprocess e <*> postprocess ty
 
-instance HasBindings a => HasBindings (Maybe a) where
-  annotateBindings = sequence . fmap annotateBindings
+instance Postprocess a => Postprocess (Maybe a) where
+  postprocess = sequence . fmap postprocess
 
-instance HasBindings a => HasBindings [a] where
-  annotateBindings = mapM annotateBindings
+instance Postprocess a => Postprocess [a] where
+  postprocess = mapM postprocess
 
-instance HasBindings (ExprClause SourceRange) where
-  annotateBindings = undefined
+instance Postprocess (ExprClause SourceRange) where
+  postprocess = undefined
 
-instance HasBindings (TypeClause SourceRange) where
-  annotateBindings = undefined
+instance Postprocess (TypeClause SourceRange) where
+  postprocess = undefined
 
-instance HasBindings (CommClause SourceRange) where
-  annotateBindings = undefined
+instance Postprocess (CommClause SourceRange) where
+  postprocess = undefined
 
-instance HasBindings (Type SourceRange) where
-  annotateBindings = undefined
+instance Postprocess (Type SourceRange) where
+  postprocess = undefined
 
-instance HasBindings (Id SourceRange) where
-  annotateBindings i = case i of
+instance Postprocess (Id SourceRange) where
+  postprocess i = case i of
     Id rng _ name -> Id rng <$> (getBinding name rng) <*> pure name
     BlankId _     -> return i
 
-instance HasBindings (Receiver SourceRange) where
-  annotateBindings = undefined
+instance Postprocess (Receiver SourceRange) where
+  postprocess = undefined
 
-instance HasBindings (Element SourceRange) where
-  annotateBindings = undefined
+instance Postprocess (Element SourceRange) where
+  postprocess = undefined
 
 makeImportBindings :: (Bindings, Bindings) -> Text -> Binding -> (Bindings, Bindings)
 makeImportBindings = undefined
