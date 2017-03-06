@@ -178,9 +178,12 @@ isType (Id _ bind _) = case bind^.bindingKind of
 
 class Postprocess a where
   postprocess :: a -> Parser a
-  -- ^ Collect the bindings from `a` in the current scope and modify
+  -- ^ Postprocess the AST:
+  -- 1. Collect the bindings from `a` in the current scope and modify
   -- binding annotations on identifiers to reflect the kind of the
   -- binding and the relevant type.
+  -- 2. Disambiguate expressions.
+  -- 3. Infer/check types
 
 -- | This instance will record only the bindings exported from the
 -- package. 
@@ -192,11 +195,11 @@ instance Postprocess (Package SourceRange) where
        newScope $ do 
          -- 3. Gather all the top level bindings in the current package
          imports <- liftM (HM.fromList) $ mapM (\f -> collectTopLevelBindings f >>= return . (fileName f,)) $ NE.toList files
-         -- 4. Traverse each file, recording and annotating bindings
-         (Package a pname) <$> mapM (annotateFileBindings imports) files
+         -- 4. Traverse and postprocess each file
+         (Package a pname) <$> mapM (postprocessFile imports) files
 
-annotateFileBindings :: HashMap Text (HashMap Text Binding) -> File SourceRange -> Parser (File SourceRange)
-annotateFileBindings imports f = bracketScope $
+postprocessFile :: HashMap Text (HashMap Text Binding) -> File SourceRange -> Parser (File SourceRange)
+postprocessFile imports f = bracketScope $
   modifyInnerScope (`HM.union` (HM.lookupDefault (HM.empty) (fileName f) imports))
   >> postprocess f
 
@@ -223,25 +226,26 @@ collectTopLevelBindings (File _ _ _ imports tops)  =
 
 instance Postprocess (File SourceRange) where
   postprocess (File a fname pname imports topLevels) =
-    (File a fname pname imports) <$> mapM annotateFunctions topLevels
-    where annotateFunctions :: TopLevel SourceRange
-                            -> Parser (TopLevel SourceRange)
-          annotateFunctions tl = case tl of
-            FunctionDecl a name params returns mbody ->
-              fmap (FunctionDecl a name params returns) $ newScope $
-              do postprocess params
-                 postprocess returns
-                 sequence $ fmap (mapM postprocess) mbody
-            MethodDecl a recv name params returns mbody ->
-              fmap (MethodDecl a recv name params returns) $ newScope $
-              do postprocess params
-                 postprocess returns
-                 sequence $ fmap (mapM postprocess) mbody
-            -- we have already analysed and recorded bindings from
-            -- declarations in `collectTopLevelBindings` and there are
-            -- no nested binding scopes in them, so we skip top
-            -- declarations.
-            TopDecl {} -> return tl
+    (File a fname pname imports) <$> mapM postprocessFunctions topLevels
+
+postprocessFunctions :: TopLevel SourceRange
+                     -> Parser (TopLevel SourceRange)
+postprocessFunctions tl = case tl of
+  FunctionDecl a name params returns mbody -> newScope $
+    do params' <- postprocess params
+       returns' <- postprocess returns
+       liftM (FunctionDecl a name params' returns') $
+         sequence $ fmap (mapM postprocess) mbody
+  MethodDecl a recv name params returns mbody -> newScope $
+    do recv' <- postprocess recv
+       params' <- postprocess params
+       returns' <- postprocess returns
+       liftM (MethodDecl a recv' name params' returns') $
+         sequence $ fmap (mapM postprocess) mbody
+       -- we have already analysed and recorded bindings from
+       -- declarations in `collectTopLevelBindings` and there are no
+       -- nested binding scopes in them, so we skip top declarations.
+  TopDecl {} -> return tl
 
 instance Postprocess (ParameterList SourceRange) where
   postprocess pl = case pl of
@@ -249,7 +253,7 @@ instance Postprocess (ParameterList SourceRange) where
     AnonymousParameterList {} -> return pl
 
 instance Postprocess (NamedParameter SourceRange) where
-  postprocess np@(NamedParameter a ident ty) =
+  postprocess (NamedParameter a ident ty) =
     liftM (\i -> NamedParameter a i ty) $ declareBindingIdM ident (VarB noType) 
 
 instance Postprocess (ReturnList SourceRange) where
@@ -355,22 +359,24 @@ nonBlankId i = case i of
   BlankId _ -> False
 
 instance Postprocess (Expression SourceRange) where
-  postprocess e = case e of
-    FunctionLit a params returns body -> undefined
-    CompositeLit a ty els -> CompositeLit a <$> postprocess ty <*> mapM postprocess els
-    MethodExpr a recv ident -> MethodExpr a <$> postprocess recv <*> postprocess ident
-    CallExpr a fne mty args mvariadic -> CallExpr a <$> postprocess fne <*> postprocess mty <*> mapM postprocess args <*> sequence (postprocess <$> mvariadic)
-    Name a mqualifier ident -> Name a <$> postprocess mqualifier <*> postprocess ident
-    -- ^ TODO Check if ident is bound to a var or const. Check that
-    -- qualifier is bound to a package name and ident is bound to a
-    -- var or const exported from it
-    BinaryExpr a op left right -> BinaryExpr a op <$> postprocess left <*> postprocess right
-    UnaryExpr a op e -> UnaryExpr a op <$> postprocess e
-    Conversion a ty e -> Conversion a <$> postprocess ty <*> postprocess e
-    FieldSelector a e fname -> FieldSelector a <$> postprocess e <*> postprocess fname
-    IndexExpr a base index -> IndexExpr a <$> postprocess base <*> postprocess index
-    SliceExpr a base me1 me2 me3 -> SliceExpr a <$> postprocess base <*> postprocess me1 <*> postprocess me2 <*> postprocess me3
-    TypeAssertion a e ty -> TypeAssertion a <$> postprocess e <*> postprocess ty
+  postprocess e =
+    let mpp = case e of
+          FunctionLit a params returns body -> error "unsupported expression"
+          CompositeLit a ty els -> CompositeLit a <$> postprocess ty <*> mapM postprocess els
+          MethodExpr a recv ident -> MethodExpr a <$> postprocess recv <*> postprocess ident
+          CallExpr a fne mty args mvariadic -> CallExpr a <$> postprocess fne <*> postprocess mty <*> mapM postprocess args <*> sequence (postprocess <$> mvariadic)
+          Name a mqualifier ident -> Name a <$> postprocess mqualifier <*> postprocess ident
+          -- ^ TODO Check if ident is bound to a var or const. Check
+          -- that qualifier is bound to a package name and ident is
+          -- bound to a var or const exported from it
+          BinaryExpr a op left right -> BinaryExpr a op <$> postprocess left <*> postprocess right
+          UnaryExpr a op e -> UnaryExpr a op <$> postprocess e
+          Conversion a ty e -> Conversion a <$> postprocess ty <*> postprocess e
+          FieldSelector a e fname -> FieldSelector a <$> postprocess e <*> postprocess fname
+          IndexExpr a base index -> IndexExpr a <$> postprocess base <*> postprocess index
+          SliceExpr a base me1 me2 me3 -> SliceExpr a <$> postprocess base <*> postprocess me1 <*> postprocess me2 <*> postprocess me3
+          TypeAssertion a e ty -> TypeAssertion a <$> postprocess e <*> postprocess ty
+    in  mpp >>= disambiguate
 
 instance Postprocess a => Postprocess (Maybe a) where
   postprocess = sequence . fmap postprocess
@@ -379,13 +385,13 @@ instance Postprocess a => Postprocess [a] where
   postprocess = mapM postprocess
 
 instance Postprocess (ExprClause SourceRange) where
-  postprocess = undefined
+  postprocess = error "Switch statements are not supported"
 
 instance Postprocess (TypeClause SourceRange) where
-  postprocess = undefined
+  postprocess = error "Switch statements are not supported"
 
 instance Postprocess (CommClause SourceRange) where
-  postprocess = undefined
+  postprocess = error "Select statements are not supported"
 
 instance Postprocess (Type SourceRange) where
   postprocess = undefined
