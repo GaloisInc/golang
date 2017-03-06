@@ -387,8 +387,8 @@ primaryExpr :: {Expression SourceRange}
   | primaryExpr arguments {let (mt, args, mspread) = $2 in pos ($1, ((mt,args), mspread)) CallExpr $1 mt args mspread}
   | primaryExpr literalValue {%
       case $1 of {
-        FieldSelector _ (Name _ id1) id2 -> return ($2 (pos $1 NamedType (pos $1 TypeName (Just id1) id2)));
-        (Name _ tyn) -> return ($2 (pos $1 NamedType (pos $1 TypeName Nothing tyn)));
+        FieldSelector _ (Name _ Nothing id1) id2 -> return ($2 (pos $1 NamedType (pos $1 TypeName (Just id1) id2)));
+        (Name _ mqual tyn) -> return ($2 (pos $1 NamedType (pos $1 TypeName mqual tyn)));
         _ -> unexpected $1 "Syntax error when parsing the type of a composite literal";
       }
     }
@@ -421,8 +421,8 @@ operand :: {Expression SourceRange}
   | string {pos $1 StringLit (getString $1)}
   | 'func' parameters optreturns block {pos ($1, $4) FunctionLit $2 $3 $4}
   | literalTypeNoName literalValue {$2 $1}
-  | identifier {pos $1 Name $1}
---  | identifier '.' identifier {pos ($1, $3) Qualified $1 $3}
+  | identifier {pos $1 Name Nothing $1}
+--  | identifier '.' identifier {pos ($1, $3) Name (Just $1) $3}
   | '(' expr ')' {$2}
 
 -- Special form of expression that excludes a composite literal form
@@ -476,7 +476,7 @@ guardOperand :: {Expression SourceRange}
   | string {pos $1 StringLit (getString $1)}
   | 'func' parameters optreturns block {pos ($1, $4) FunctionLit $2 $3 $4}
   | literalTypeNoName literalValue {$2 $1}
-  | identifier {pos $1 Name $1}
+  | identifier {pos $1 Name Nothing $1}
   | '(' expr ')' {$2}
 
 binop :: {BinaryOp}
@@ -545,8 +545,8 @@ keyedElement :: {Type SourceRange -> Element SourceRange}
   : elementOrKey {\t -> pos ($1 t) Element ($1 t)}
   | elementOrKey ':' elementOrKey {\t ->
      let k = case ($1 t) of {
-        Name p id -> FieldKey p id;
-        e         -> pos e ExprKey e;
+        Name p Nothing id -> FieldKey p id;
+        e                 -> pos e ExprKey e;
      } in pos (k, $3 t) KeyedEl k ($1 t)}
 
 
@@ -808,7 +808,7 @@ errorP ts =
 -- Coerce an expression to an identifier, returning an unexpected
 -- error if not possible.
 coerceToId :: Expression SourceRange -> Either (SourceRange, String) (Id SourceRange)
-coerceToId (Name _ id) = return id
+coerceToId (Name _ Nothing id) = return id
 coerceToId e           = unexpected e "Expecting an identifier"
 
 simple2maybeStmt :: Statement a -> Maybe (Statement a)

@@ -92,35 +92,74 @@ liftHappy = either throwError return
 
 -- | Infer identifier bindings, types of variables and expressions and
 -- disambiguate expressions
-postprocess :: Package SourceRange -> Parser (Package SourceRange)
-postprocess = annotateBindings >=> disambiguate
+-- postprocess :: Package SourceRange -> Parser (Package SourceRange)
+-- postprocess = annotateBindings >=> disambiguate
 
 --   Based on the semantics of identifiers (in annotations) rewrite expressions:
 --      * FieldSelector with the object part that is a Name. Check if
---        that Name is a package name. If so, this expression it can
+--        that Name is a package name. If so, this expression can
 --        be a QualifiedName.
 --      * CallExpr with either:
---        - the length of the arguments list is 1. Check if the
---          function part is a name which is a named type, or a field
---          selector which is a a QualifiedTypeName. If so, this is a
---          type conversion.
---        - the first argument is a Name or a field selector. If so,
---          that argument can be a named type instead
-disambiguate :: Package SourceRange -> Parser (Package SourceRange)
-disambiguate = transformBiM disambiguateExpression
-  where disambiguateExpression :: Expression SourceRange
-                               -> Parser (Expression SourceRange)
-        disambiguateExpression e = case e of
-          FieldSelector a (Name na ident) fident@(Id _ _ fname) ->
-            case ident of
-              Id _ bind pname -> case bind^.bindingKind of
-                PackageB _ pexports ->
-                  if HM.member fname pexports then return $ Qualified a ident fident
-                  else unexpected fident $ "Identifier " ++ (T.unpack fname) ++ " not exported from package " ++ (T.unpack pname)
-                _                   -> return e
-              BlankId {}  -> unexpected ident "Reading from a blank identifier"
-          _ -> undefined
+--        - the length of the arguments list is 1 and the first
+--          argument is not a type. Check if the function part is a
+--          name which is a named type, or a Name with a qualifier that
+--          referse to a type. If so, this is a type conversion.
+--        - the first argument is a Name
+--          (disambiguated per rule 1). If so, that argument can be a
+--          named type instead
+--   Note: this just looks at the top level node, so should be called
+--   from a function that does a recursive traversal.
+disambiguate :: Expression SourceRange -> Parser (Expression SourceRange)
+disambiguate e = case e of
+  FieldSelector a (Name na Nothing ident) fident@(Id _ _ fname) ->
+    case ident of
+      Id _ bind pname -> case bind^.bindingKind of
+        PackageB _ pexports ->
+          if HM.member fname pexports then return $ Name a (Just ident) fident
+          else unexpected fident $ "Identifier " ++ (T.unpack fname) ++ " not exported from package " ++ (T.unpack pname)
+        _                   -> return e
+      BlankId {}  -> unexpected ident "Reading from a blank identifier"
+      _ -> undefined
+  CallExpr a fn mtype args mspread ->
+       do -- 1. disambiguate arguments to see if the first argument is
+          -- actually a type
+          (mtype', args') <- case args of
+            (a:as) -> case a of
+              Name _ mqual ident ->
+                do (mtype'', mexp) <- disambiguateFirstTypeParam mtype mqual ident
+                   return (mtype'', (maybeToList mexp) ++ as)
+              _                  -> return (mtype, args)
+            [] -> return (mtype, args)
+          let call' = CallExpr a fn mtype' args' mspread
+          -- 2. Disambiguate the call expression from a type conversion.
+          case fn of
+            Name rng mqual ident ->
+              if isType ident && -- the function part is actually a type
+                 isNothing mtype && -- the first argument is not a type
+                 length args == 1 && -- there is exactly one argument
+                 isNothing mspread -- there is no spread argument
+              then return $ pos (rng, head args) Conversion 
+                   (NamedType rng $ TypeName rng mqual ident)
+                   (head args)
+              else return call'
+            _ -> return call'
 
+disambiguateFirstTypeParam :: Maybe (Type SourceRange)
+                           -> Maybe (Id SourceRange)
+                           -> Id (SourceRange)
+                           -> Parser (Maybe (Type SourceRange), Maybe (Expression SourceRange))
+disambiguateFirstTypeParam mtype mqual ident =
+  if isType ident then
+    case mtype of
+      Just _ -> unexpected ident "More than one type parameter to a function call"
+      Nothing -> return (Just $ pos (mqual, ident) NamedType $ pos (mqual, ident) TypeName mqual ident, Nothing)
+  else return (mtype, Just $ pos (mqual, ident) Name mqual ident)
+
+isType :: Id a -> Bool
+isType (Id _ bind _) = case bind^.bindingKind of
+  TypeB _ -> True
+  _       -> False
+    
 -- 1) The scope of a predeclared identifier is the universe block.
 -- 2) The scope of an identifier denoting a constant, type, variable,
 -- or function (but not method) declared at top level (outside any

@@ -19,15 +19,10 @@ instance Typed (Expression SourceRange) where
     ImaginaryLit {} -> return $ Complex Nothing
     RuneLit {} -> return runeType
     StringLit {} -> return String
-    Name _ (Id rng bind _) -> case bind^.bindingKind of
-                              VarB st -> return st
-                              ConstB st -> return st
-                              _       -> unexpected rng "An identifier is used as a variable, but not bound to a value"
-    Qualified _ _ (Id rng bind _) ->
-      case bind^.bindingKind of
-        VarB st -> return st
-        ConstB st -> return st
-        _       -> unexpected rng "An identifier is used as a variable, but not bound to a value"
+    Name _ mqual (Id rng bind _) -> case bind^.bindingKind of
+                                      VarB st -> return st
+                                      ConstB st -> return st
+                                      _       -> unexpected rng "An identifier is used as a variable, but not bound to a value"
     _ -> unexpected e "Expression not supported"
 
 instance Typed (Type a) where

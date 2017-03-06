@@ -280,8 +280,7 @@ data Expression a = IntLit a Integer
                   | CompositeLit a (Type a) [Element a]
                   | MethodExpr a (Receiver a) (Id a)
                   | CallExpr a (Expression a) (Maybe (Type a)) [Expression a] (Maybe (Expression a)) -- ^The last is the optional variadic spread parameter
-                  | Name a (Id a)
-                  | Qualified a (Id a) (Id a)
+                  | Name a (Maybe (Id a)) (Id a)
                   | BinaryExpr a BinaryOp (Expression a) (Expression a)
                   | UnaryExpr a UnaryOp (Expression a)
                   | Conversion a (Type a) (Expression a) -- ^Type casts (conversions)
