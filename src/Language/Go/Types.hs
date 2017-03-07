@@ -25,14 +25,18 @@ instance Typed (Expression SourceRange) where
                                       _       -> unexpected rng "An identifier is used as a variable, but not bound to a value"
     _ -> unexpected e "Expression not supported"
 
-instance Typed (Type a) where
+instance Typed (Type SourceRange) where
   getType t = case t of
+    NamedType _ (TypeName _ _ (Id rng bind _)) ->
+                 case bind^.bindingKind of
+                   TypeB st -> return st
+                   _ -> unexpected rng "An identifier is used as a type name, but not bound to a type"
     _ -> undefined
 
-instance Typed (NamedParameter a) where
+instance Typed (NamedParameter SourceRange) where
   getType (NamedParameter _ _ ty) = getType ty
 
-instance Typed (Receiver a) where
+instance Typed (Receiver SourceRange) where
   getType (Receiver _ _ pointed tn) =
     let tnt = Alias (reannotate (const ()) tn) in return $ if pointed then Pointer tnt else tnt
 

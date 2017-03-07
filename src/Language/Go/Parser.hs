@@ -1,6 +1,8 @@
 {-# LANGUAGE LambdaCase, FlexibleContexts, FlexibleInstances, TupleSections, OverloadedStrings #-}
 module Language.Go.Parser (parsePackage
                           ,parseFile
+                          ,parseText
+                          ,defaultPackageLoader
                           ,SourceRange(..)
                           ,SourcePos(..)
                           ,Parser
@@ -143,6 +145,7 @@ disambiguate e = case e of
                    (head args)
               else return call'
             _ -> return call'
+  _ -> return e
 
 disambiguateFirstTypeParam :: Maybe (Type SourceRange)
                            -> Maybe (Id SourceRange)
@@ -249,17 +252,20 @@ postprocessFunctions tl = case tl of
 
 instance Postprocess (ParameterList SourceRange) where
   postprocess pl = case pl of
-    NamedParameterList a nps mrestp -> NamedParameterList a <$> mapM postprocess nps <*> (sequence $ postprocess <$> mrestp)
-    AnonymousParameterList {} -> return pl
+    NamedParameterList a nps mrestp -> NamedParameterList a <$> postprocess nps <*> postprocess mrestp
+    AnonymousParameterList a aps mrestp -> AnonymousParameterList a <$> postprocess aps <*> postprocess mrestp
 
 instance Postprocess (NamedParameter SourceRange) where
   postprocess (NamedParameter a ident ty) =
-    liftM (\i -> NamedParameter a i ty) $ declareBindingIdM ident (VarB noType) 
+    do ty' <- postprocess ty
+       tyt <- getType ty'
+       i' <- declareBindingIdM ident (VarB tyt)
+       return $ NamedParameter a i' ty'
 
 instance Postprocess (ReturnList SourceRange) where
   postprocess rl = case rl of
-    NamedReturnList a nps  -> NamedReturnList a <$> mapM postprocess nps
-    AnonymousReturnList {} -> return rl
+    NamedReturnList a nps  -> NamedReturnList a <$> postprocess nps
+    AnonymousReturnList a aps -> AnonymousReturnList a <$> postprocess aps
 
 -- An identifier is exported iff:
 -- 1) the first character of the identifier's name is a Unicode upper
@@ -281,13 +287,15 @@ instance Postprocess (ImportDecl SourceRange) where
 instance Postprocess (TopLevel SourceRange) where
   postprocess tl = case tl of
     FunctionDecl a fname params returns body ->
-      do bk <- VarB <$> (Function Nothing <$> getParamTypes params <*> getSpreadType params <*> getReturnTypes returns)
+      do (params', returns') <- newScope $ liftM2 (,) (postprocess params) (postprocess returns)
+         bk <- VarB <$> (Function Nothing <$> getParamTypes params' <*> getSpreadType params' <*> getReturnTypes returns')
          fname' <- declareBindingIdM fname bk
-         return (FunctionDecl a fname' params returns body)
+         return (FunctionDecl a fname' params' returns' body)
     MethodDecl  a recv mname params returns body ->
-      do bk <- VarB <$> (Function <$> (Just <$> getType recv) <*> getParamTypes params <*> getSpreadType params <*> getReturnTypes returns)
+      do (params', returns', recv') <- newScope $ liftM3 (,,) (postprocess params) (postprocess returns) (postprocess recv)
+         bk <- VarB <$> (Function <$> (Just <$> getType recv') <*> getParamTypes params' <*> getSpreadType params' <*> getReturnTypes returns')
          mname' <- declareBindingIdM mname bk
-         return (MethodDecl a recv mname' params returns body)
+         return (MethodDecl a recv' mname' params' returns' body)
     TopDecl a decl -> TopDecl a <$> postprocess decl
 
 instance Postprocess (Declaration SourceRange) where
@@ -394,7 +402,7 @@ instance Postprocess (CommClause SourceRange) where
   postprocess = error "Select statements are not supported"
 
 instance Postprocess (Type SourceRange) where
-  postprocess = undefined
+  postprocess = transformBiM (postprocess :: Id SourceRange -> Parser (Id SourceRange))
 
 instance Postprocess (Id SourceRange) where
   postprocess i = case i of

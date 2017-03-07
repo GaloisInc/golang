@@ -19,6 +19,7 @@ import Data.Traversable (sequence)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.List (intercalate)
+import Data.Default.Class
 }
 
 %tokentype { Lexeme Token }
@@ -214,7 +215,7 @@ revNonEmptyExprList :: {NonEmpty (Expression SourceRange)}
 
 identifier :: {Id SourceRange}
   : ident {if getIdent $1 == T.singleton '_' then pos $1 BlankId
-           else pos $1 Id undefined (getIdent $1)
+           else pos $1 Id def (getIdent $1)
           }
 
 optidentifier :: {Maybe (Id SourceRange)}

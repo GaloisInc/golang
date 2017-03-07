@@ -85,6 +85,7 @@ import Data.Semigroup
 import AlexTools (SourceRange(..), SourcePos (..))
 import Data.Map (Map)
 import Data.HashMap.Lazy (HashMap)
+import Data.Default.Class
 
 data Package a = Package a Text {- package name -} (NonEmpty (File a))
   deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
@@ -246,7 +247,11 @@ type AnonymousParameter = Type
 -- | Identifiers
 data Id a = Id a Binding Text -- ^are either names
           | BlankId a -- ^or blank ("_")
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  deriving (Data, Typeable, Functor, Foldable, Traversable)
+
+instance Show a => Show (Id a) where
+  show (Id a b n) = show n ++ "@" ++ show a ++ " " ++ show b
+  show (BlankId a) = "_@" ++ show a
 
 -- | Statement labels
 data Label a = Label a Text
@@ -344,6 +349,7 @@ data BindingKind = TypeB SemanticType
                  | ConstB SemanticType
                  | PackageB (Maybe Text) (HashMap Text Binding)
                  | FieldOrMethodB SemanticType
+                 | Unbound
   deriving (Data, Typeable, Show)
 
 data Binding = Binding {_bindingDeclLoc :: SourceRange
@@ -351,7 +357,22 @@ data Binding = Binding {_bindingDeclLoc :: SourceRange
                        ,_bindingImported :: Bool
                        ,_bindingThisScope :: Bool
                        }
-  deriving (Data, Typeable, Show)
+  deriving (Data, Typeable)
+
+instance Show Binding where
+  show b = "(bound at " ++ show (_bindingDeclLoc b) ++ " to " ++ show (_bindingKind b) ++ " (" ++ if _bindingImported b then "imported " else "" ++ if _bindingThisScope b then "local" else "" ++ ")"
+
+instance Default Binding where
+  def = Binding def def False False
+
+instance Default BindingKind where
+  def = Unbound
+
+instance Default SourceRange where
+  def = SourceRange def def
+
+instance Default SourcePos where
+  def = SourcePos (-1) (-1) (-1)
 
 -- | Changes all the labels in the tree to another one, given by a
 -- function.
