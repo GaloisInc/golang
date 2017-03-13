@@ -45,8 +45,14 @@ mkBinding n r bk = Binding {_bindingDeclLoc = range r
 declareBinding :: Text -> Binding -> Bindings -> Bindings
 declareBinding ident bind (b :| bs) = HM.insert ident bind b :| bs
 
+-- | lookup the value of the binding recursively in the scopes
 lookupBinding :: Text -> Bindings -> Maybe Binding
-lookupBinding id (b :| _) = HM.lookup id b
+lookupBinding name (b :| bs) =
+  case HM.lookup name b of
+    Just bind -> Just bind
+    Nothing -> case bs of
+      [] -> Nothing
+      b':bs' -> lookupBinding name (b':|bs')
 
 pushScope :: Bindings -> Bindings
 pushScope (b :| rest) = (HM.map notThisContext b) :| b:rest

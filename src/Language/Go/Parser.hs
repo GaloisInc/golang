@@ -60,7 +60,7 @@ parseText :: Text -- ^ Text of a file/module
           -> (Text -> Parser (Package SourceRange))
           -- ^ A resolver/loader function for imported
           -- modules. Implementations are encouraged to use
-          -- `parse`. For an example implementation see
+          -- `parsePackage`. For an example implementation see
           -- `defaultPackageLoader` and `parsePackage`.
           -> IO (Either (SourceRange, String) (File SourceRange))
 parseText txt loader = runParser $ parse txt loader
@@ -311,8 +311,10 @@ instance Postprocess (TypeSpec SourceRange) where
 instance Postprocess (VarSpec SourceRange) where
   postprocess vs = case vs of
     TypedVarSpec a idents ty inits ->
-      do idents' <- mapM (\ident -> (VarB <$> getType ty) >>= declareBindingIdM ident) idents
-         return $ TypedVarSpec a idents' ty inits
+      do ty' <- postprocess ty
+         idents' <- mapM (\ident -> (VarB <$> getType ty') >>= declareBindingIdM ident) idents
+         inits' <- postprocess inits
+         return $ TypedVarSpec a idents' ty' inits'
          -- ^ TODO check that the inferred types of inits are compatible with ty
     UntypedVarSpec a idents inits ->
       if NE.length idents == NE.length inits then
@@ -384,6 +386,7 @@ instance Postprocess (Expression SourceRange) where
           IndexExpr a base index -> IndexExpr a <$> postprocess base <*> postprocess index
           SliceExpr a base me1 me2 me3 -> SliceExpr a <$> postprocess base <*> postprocess me1 <*> postprocess me2 <*> postprocess me3
           TypeAssertion a e ty -> TypeAssertion a <$> postprocess e <*> postprocess ty
+          _ -> return e
     in  mpp >>= disambiguate
 
 instance Postprocess a => Postprocess (Maybe a) where
