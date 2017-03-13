@@ -7,7 +7,8 @@ import Data.Generics.Uniplate.Data
 import Language.Go.Bindings
 import Lens.Simple
 import Control.Monad.Error.Class
-import Language.Go.Parser.Util (unexpected)
+import Language.Go.Parser.Util (unexpected, Ranged(..))
+import Control.Monad (unless)
 
 class Typed a where
   getType :: MonadError (SourceRange, String) m => a -> m SemanticType
@@ -23,7 +24,29 @@ instance Typed (Expression SourceRange) where
                                       VarB st -> return st
                                       ConstB st -> return st
                                       _       -> unexpected rng "An identifier is used as a variable, but not bound to a value"
+    -- For binary operators, other than comparisons, the operand types
+    -- must be identical unless the operation involves shifts or
+    -- untyped constants. Arithmetic operators apply to numeric values
+    -- and yield a result of the same type as the first
+    -- operand. Except for shift operations, if one operand is an
+    -- untyped constant and the other operand is not, the constant is
+    -- converted to the type of the other operand.
+    BinaryExpr _ op left right ->
+      do lt <- getType left
+         rt <- getType right
+         case op of
+           Add -> do assertTypeIdentity (left, right) lt rt
+                     return lt
+    UnaryExpr  _ op operand    -> undefined
     _ -> unexpected e "Expression not supported"
+
+isInt :: SemanticType -> Bool
+isInt (Int {}) = True
+isInt _ = False
+
+assertTypeIdentity :: (MonadError (SourceRange, String) m, Ranged r)
+                   => r -> SemanticType -> SemanticType -> m ()
+assertTypeIdentity rng st1 st2 = unless (st1 == st2) $ unexpected rng "Expecting operands to have identical types"
 
 instance Typed (Type SourceRange) where
   getType t = case t of
@@ -74,3 +97,45 @@ getReceiverType :: MonadError (SourceRange, String) m
                 => Receiver SourceRange -> m SemanticType
 getReceiverType = getType
                       
+-- | Type assignability (see Spec). Something of type `r` is assignable to something of type `l` if this predicate holds
+assignable :: SemanticType -> SemanticType -> Bool
+assignable l r = undefined
+
+
+-- | Type identity. From the Spec:
+-- Two types are either identical or different.  Two named types are
+-- identical if their type names originate in the same TypeSpec.  A
+-- named and an unnamed type are always different. Two unnamed types
+-- are identical if the corresponding type literals are identical,
+-- that is, if they have the same literal structure and corresponding
+-- components have identical types. In detail:
+--   * Two array types are identical if they have identical element types and the
+--     same array length.
+--   * Two slice types are identical if they have identical element types.
+--   * Two struct types are identical if they have the same sequence of fields, and
+--     if corresponding fields have the same names, and identical types, and
+--     identical tags. Two anonymous fields are considered to have the same name.
+--     Lower-case field names from different packages are always different.
+--   * Two pointer types are identical if they have identical base types.
+--   * Two function types are identical if they have the same number of parameters
+--     and result values, corresponding parameter and result types are identical,
+--     and either both functions are variadic or neither is. Parameter and result
+--     names are not required to match.
+--   * Two interface types are identical if they have the same set of methods with
+--     the same names and identical function types. Lower-case method names from
+--     different packages are always different. The order of the methods is
+--     irrelevant.
+--   * Two map types are identical if they have identical key and value types.
+--   * Two channel types are identical if they have identical value types and the
+--     same direction.
+instance Eq SemanticType where
+  (Alias tyn1) == (Alias tyn2) = tyn1 `typeNamesIdentical` tyn2
+  (Alias _)    == _            = False
+  _            == (Alias _)     = False
+  
+
+-- | "Two named types are identical if their type names originate in
+-- the same TypeSpec." Which means both names and declaration
+-- locations should be the same.
+typeNamesIdentical :: TypeName a -> TypeName a -> Bool
+typeNamesIdentical (TypeName _ _ (Id _ bind1 name1)) (TypeName _ _ (Id _ bind2 name2)) = name1 == name2 && (bind1^.bindingDeclLoc == bind2^.bindingDeclLoc)
