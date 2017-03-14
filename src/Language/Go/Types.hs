@@ -132,10 +132,20 @@ instance Eq SemanticType where
   (Alias tyn1) == (Alias tyn2) = tyn1 `typeNamesIdentical` tyn2
   (Alias _)    == _            = False
   _            == (Alias _)     = False
+  Int width1 signed1 == Int width2 signed2 = width1 == width2 && signed1 == signed2
+  et1            == et2             = error $ "Unmatched semantic type comparison: " ++ show et1 ++ " and " ++ show et2
   
-
 -- | "Two named types are identical if their type names originate in
 -- the same TypeSpec." Which means both names and declaration
 -- locations should be the same.
 typeNamesIdentical :: TypeName a -> TypeName a -> Bool
 typeNamesIdentical (TypeName _ _ (Id _ bind1 name1)) (TypeName _ _ (Id _ bind2 name2)) = name1 == name2 && (bind1^.bindingDeclLoc == bind2^.bindingDeclLoc)
+
+-- | Remove all the unknown bitwidths from types
+specializeType :: Int {- ^ Machine word width in bits -} ->  SemanticType -> SemanticType
+specializeType machineWordSize = transform (specializeInt machineWordSize . defaultType) 
+
+specializeInt :: Int -> SemanticType -> SemanticType
+specializeInt machineWordSize ty = case ty of
+  Int Nothing signed -> Int (Just machineWordSize) signed
+  _ -> ty
