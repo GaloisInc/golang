@@ -65,7 +65,9 @@ module Language.Go.AST (SourceRange (..)
                        ,bindingDeclLoc
                        ,bindingThisScope
                        ,BindingKind(..)
-                       ,SemanticType (..)
+                       ,VarType (..)
+                       ,ConstType (..)
+                       ,ExprType (..)
                        ,ann
                        ,Annotated
                        ,reannotate) where
@@ -321,36 +323,46 @@ deriving instance Typeable SourceRange
 deriving instance Data SourcePos
 deriving instance Typeable SourcePos
 
-data SemanticType = Int (Maybe Int) {- ^ Bitwidth. Architecture-dependent if `Nothing` -} Bool {- ^ Signed? -}
-               | Boolean
-               | Float (Maybe Int) {- ^ Bitwidth, if nothing it's an "untyped constant" -}
-               | Complex (Maybe Int)  {- ^ Bitwidth, if nothing it's an "untyped constant" -}
-               | Iota
-               | Nil
-               | String
-               | Function (Maybe SemanticType) -- ^ Method receiver type
-                 [SemanticType] -- ^ Parameter types
-                 (Maybe  SemanticType) -- ^ Spread parameter
-                 [SemanticType] -- ^ Return types
-               | Array (Maybe (Expression (Maybe Binding))) SemanticType
-               | Struct (Map Text (SemanticType, Maybe Text))
-               | Pointer SemanticType
-               | Interface (Map Text SemanticType)
-               | Map SemanticType SemanticType
-               | Slice SemanticType
-               | Channel (ChannelDirection ()) SemanticType
-               | Alias (TypeName ())
-               | Tuple [SemanticType]
-               | BuiltIn Text
+-- | The type of data that can be stored in Go (variables and fields)
+data VarType = Int (Maybe Int) {- ^ Bitwidth. Architecture-dependent if `Nothing` -} Bool {- ^ Signed? -}
+             | Boolean
+             | Float Int {- ^ Bitwidth -}
+             | Complex Int  {- ^ Bitwidth -}
+             | Iota
+             | Nil
+             | String
+             | Function (Maybe VarType) -- ^ Method receiver type
+               [VarType] -- ^ Parameter types
+               (Maybe  VarType) -- ^ Spread parameter
+               [VarType] -- ^ Return types
+             | Array (Maybe (Expression (Maybe Binding))) VarType
+             | Struct (Map Text (VarType, Maybe Text))
+             | Pointer VarType
+             | Interface (Map Text VarType)
+             | Map VarType VarType
+             | Slice VarType
+             | Channel (ChannelDirection ()) VarType
+             | Alias (TypeName ())
+             | Tuple [VarType]
+             | BuiltIn Text
   deriving (Data, Typeable, Show)
 
-data BindingKind = TypeB SemanticType
-                 | VarB SemanticType
-                 | ConstB SemanticType
+-- | The type of constants ("untyped constants" in the spec)
+data ConstType = CTBool | CTRune | CTInt | CTFloat | CTComplex | CTString
+  deriving (Data, Typeable, Show, Eq)
+
+data ExprType = VarType VarType
+              | ConstType ConstType
+  deriving (Data, Typeable, Show)
+
+data BindingKind = TypeB VarType
+                 | VarB VarType
+                 | ConstB VarType
                  | PackageB (Maybe Text) (HashMap Text Binding)
-                 | FieldOrMethodB SemanticType
+                 | FieldOrMethodB VarType
                  | Unbound
   deriving (Data, Typeable, Show)
+
 
 data Binding = Binding {_bindingDeclLoc :: SourceRange
                        ,_bindingKind :: BindingKind
