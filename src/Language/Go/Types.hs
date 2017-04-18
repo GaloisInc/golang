@@ -15,11 +15,11 @@ class Typed a where
 
 getExprType :: MonadError (SourceRange, String) m => Expression SourceRange -> m ExprType
 getExprType e = case e of
-    IntLit {} -> return $ ConstType CTInt
-    FloatLit {} -> return $ ConstType CTFloat
-    ImaginaryLit {} -> return $ ConstType CTComplex
-    RuneLit {} -> return $ ConstType CTRune
-    StringLit {} -> return $ ConstType CTString
+    IntLit _ i -> return $ ConstType $ CInt i
+    FloatLit _ d -> return $ ConstType $ CFloat d
+    ImaginaryLit _ im -> return $ ConstType $ CComplex 0 im
+    RuneLit _ c -> return $ ConstType $ CRune c
+    StringLit _ s -> return $ ConstType $ CString s
     Name _ mqual (Id rng bind _) -> case bind^.bindingKind of
                                       VarB st -> return $ VarType st
                                       ConstB st -> return $ VarType st
@@ -74,27 +74,40 @@ defaultType :: ExprType -> VarType
 defaultType et = case et of
   VarType vt -> vt
   ConstType ct -> case ct of
-    CTBool  -> Boolean
-    CTRune  -> runeType
-    CTInt   -> Int Nothing True
-    CTFloat -> Float 64
-    CTComplex -> Complex 128
-    CTString -> String
+    CBool _  -> Boolean
+    CRune _  -> runeType
+    CInt _   -> Int Nothing True
+    CFloat _ -> Float 64
+    CComplex _ _ -> Complex 128
+    CString _ -> String
 
--- | Whether a value of an `ExprType` is assignable to a location of a `VarType`
+-- | Whether a value of an `ExprType` is assignable to a location of a `VarType`.
+
+
 assignableTo :: ExprType -> VarType -> Bool
-assignableTo from to = undefined
+assignableTo from to =
+  -- Spec: A value x is assignable to a variable of type T ("x is
+  -- assignable to T") in any of these cases:
+  case from of
+    -- * x's type is identical to T.
+    VarType t | t == to -> undefined
+    -- * x's type V and T have identical underlying types and at least
+    --   one of V or T is not a named type.
+    
+    
+--   * T is an interface type and x implements T.
+--   * x is a bidirectional channel value, T is a channel type, x's
+--     type V and T have identical element types, and at least one of
+--     V or T is not a named type.
+--   * x is the predeclared identifier nil and T is a pointer,
+--     function, slice, map, channel, or interface type.
+    --   * x is an untyped constant representable by a value of type T.
+    ConstType ct -> representableBy ct to
 
-data ConstValue = CVFloat Double
-                | CVBool  Bool
-                | CVRune  Char
-                | CVInt   Integer
-                | CVComplex Double Double
-                | CVString  String
 
 -- | Whether a constant can be represented by a particular variable type
-representableBy :: ConstValue -> VarType -> Bool
-representableBy cvalue vt = undefined
+representableBy :: ConstType -> VarType -> Bool
+representableBy ctype vt = undefined
 
 getParamTypes :: MonadError (SourceRange, String) m
               => ParameterList SourceRange -> m [VarType]
@@ -163,11 +176,11 @@ instance Eq VarType where
 -- yields an untyped complex constant.
 ctypeOrdering :: ConstType -> Maybe Int
 ctypeOrdering ct = case ct of
-  CTInt     -> Just 1
-  CTRune    -> Just 2
-  CTFloat   -> Just 3
-  CTComplex -> Just 4
-  _         -> Nothing
+  CInt _       -> Just 1
+  CRune _      -> Just 2
+  CFloat _     -> Just 3
+  CComplex _ _ -> Just 4
+  _            -> Nothing
   
 -- | Subtyping/ordering for constant types
 instance Ord ConstType where 

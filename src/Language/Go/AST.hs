@@ -347,8 +347,14 @@ data VarType = Int (Maybe Int) {- ^ Bitwidth. Architecture-dependent if `Nothing
              | BuiltIn Text
   deriving (Data, Typeable, Show)
 
--- | The type of constants ("untyped constants" in the spec)
-data ConstType = CTBool | CTRune | CTInt | CTFloat | CTComplex | CTString
+-- | The type of constants ("untyped constants" in the spec) together
+-- with their value (for deciding representability)
+data ConstType = CBool Bool
+               | CRune Char
+               | CInt Integer
+               | CFloat Double
+               | CComplex Double Double
+               | CString Text
   deriving (Data, Typeable, Show, Eq)
 
 data ExprType = VarType VarType
