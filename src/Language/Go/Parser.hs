@@ -180,56 +180,114 @@ isType (Id _ bind _) = case bind^.bindingKind of
 -- innermost containing block.
 
 class Postprocess a where
-  postprocess :: a -> Parser a
-  -- ^ Postprocess the AST:
+  -- | Postprocess the AST:
   -- 1. Collect the bindings from `a` in the current scope and modify
   -- binding annotations on identifiers to reflect the kind of the
   -- binding and the relevant type.
   -- 2. Disambiguate expressions.
   -- 3. Infer/check types
+  postprocess :: a -> Parser a
 
 -- | This instance will record only the bindings exported from the
 -- package. 
 instance Postprocess (Package SourceRange) where
-  postprocess (Package a pname files) =
+  postprocess pkg@(Package a pname files) =
     do -- 1. Initialize scope with the predefined type/var bindings
        identifiers .= defaultBindings
        -- 2. with a new scope, for each file
        newScope $ do 
-         -- 3. Gather all the top level bindings in the current package
-         imports <- liftM (HM.fromList) $ mapM (\f -> collectTopLevelBindings f >>= return . (fileName f,)) $ NE.toList files
+         -- 3. Analyse the bindings due to top-level declarations and
+         -- make a map of imported bindings for each file.
+         (topLevelBinds, importBindMap) <- topLevelBindings pkg
          -- 4. Traverse and postprocess each file
-         (Package a pname) <$> mapM (postprocessFile imports) files
+         (Package a pname) <$> mapM (postprocessFile topLevelBinds importBindMap) files
 
-postprocessFile :: HashMap Text (HashMap Text Binding) -> File SourceRange -> Parser (File SourceRange)
-postprocessFile imports f = bracketScope $
-  modifyInnerScope (`HM.union` (HM.lookupDefault (HM.empty) (fileName f) imports))
-  >> postprocess f
+-- | Returns the top-level bindings (top-level declarations and map of imported bindings for each file) for a given package
+topLevelBindings :: Package SourceRange -> Parser (Scope, HashMap Text Scope)
+topLevelBindings (Package _ _ files) =
+  let processFile :: File SourceRange -> Parser (Text, Scope, Scope)
+      processFile f = do (tops, imps) <- collectFileTopLevelBindings f
+                         return (fileName f, tops, imps)
+      mergeResults :: (Scope, HashMap Text Scope)
+                   -> (Text, Scope, Scope)
+                   -> (Scope, HashMap Text Scope)
+      mergeResults (curTops, curImpMap) (fname, tops, imps) =
+        (HM.union curTops tops, HM.insert fname imps curImpMap)
+  in  do xs <- mapM processFile $ NE.toList files
+         return $ foldl mergeResults (emptyScope, HM.empty) xs
 
--- | Adds bindings for the top-level declarations to the
--- state. Returns the imported declarations. The latter are not part
--- of the state to reflect that the scope of imports is the file
--- scope, and the scope of top level declarations is the package
--- scope.
-collectTopLevelBindings :: File SourceRange
-                        -> Parser (HashMap Text Binding)
-collectTopLevelBindings (File _ _ _ imports tops)  =
-  do oldTopBinds <- getCurrentBindings
-     -- 1. Add import bindings,
-     mapM postprocess imports
-     -- remembering the mapping separately
-     newTopBinds <- getCurrentBindings
-     let importbinds = HM.difference newTopBinds oldTopBinds
-     -- 2. Scan and add top level bindings
-     mapM postprocess tops
-     -- 3. Remove bindings for package names (difference between the
-     -- state and the remembered mapping)
-     modifyInnerScope (`HM.difference` importbinds)
-     return importbinds
+-- | Returns the bindings for this file's imports and its top-level
+-- declarations.
+collectFileTopLevelBindings :: File SourceRange -> Parser (Scope, Scope)
+collectFileTopLevelBindings (File _ _ _ imports tops)  =
+  bracketScope $ do 
+     -- 1. Get bindings to current file imports
+     importBinds <- liftM HM.unions $ mapM getImports imports
+     -- and bring them into scope
+     topLevelBinds <- pushScopeMod importBinds $
+          -- 2. Get the top-level bindings
+          newScope $ liftM HM.unions $ mapM topLevelBinding tops
+     return (topLevelBinds, importBinds)
 
-instance Postprocess (File SourceRange) where
-  postprocess (File a fname pname imports topLevels) =
-    (File a fname pname imports) <$> mapM postprocessFunctions topLevels
+-- | Bring top-level bindings for the file in scope, then postprocess the file
+postprocessFile :: Scope -> HashMap Text Scope -> File SourceRange -> Parser (File SourceRange)
+postprocessFile topLevelDecls importsMap (File a fname pname imports topLevels) =
+  pushScopeMod (HM.lookupDefault HM.empty fname importsMap) $
+  pushScopeMod topLevelDecls $
+  (File a fname pname imports) <$> mapM postprocessFunctions topLevels
+
+-- | Returns the top-level bindings corresponding to a top-level declaration
+topLevelBinding :: TopLevel SourceRange -> Parser Scope
+topLevelBinding top = case top of
+  _ -> undefined
+
+-- | Returns the imported bindings for a given import declaration
+getImports :: ImportDecl SourceRange -> Parser Scope
+getImports (ImportDecl _ ispecs) =
+  bracketScope $ liftM HM.unions $ mapM getImportsS ispecs
+  where getImportsS :: ImportSpec SourceRange -> Parser Scope
+        getImportsS i@(Import _ itype path) =
+          lookupImport path >>=
+          \case Nothing -> unexpected (i^.ann) $ "Could not find the source for the package \"" ++ show path ++ "\""
+                Just pack@(Package _ _ _) ->
+                  do exports <- newScope $ postprocess pack >> getCurrentBindings
+                     let (package, global) = undefined --HM.foldlWithKey' makeImportBindings (emptyBindings, emptyBindings) exports
+                     undefined
+
+
+-- exportBindingTransform :: (Text, Binding) -> (Text, Binding)
+-- exportBindingTransform (n, bind) =
+--                      case (itype, bind) of
+--                        (ImportAll, _) -> (n, bind.bindingImported .~ True)
+--                        -- Field names are never imported with qualifiers
+--                        (ImportQualified mpiname, Binding {_bindingKind = FieldOrMethodB _}) -> (n, bind.bindingImported .~ True)
+--                        (ImportQualified mpiname, _)->
+--                         (ImportedQualifiedB (fromMaybe pname mpiname) n, kr)
+-- An identifier is exported iff:
+-- 1) the first character of the identifier's name is a Unicode upper
+-- case letter (Unicode class "Lu"); and
+-- 2) the identifier is declared in the package block or it is a field
+-- name or method name.
+isExported :: Text -> Binding -> Bool
+isExported n bind | not (bind^.bindingImported) = generalCategory (T.head n) == UppercaseLetter
+isExported _ _                                  = False
+  
+topLevelNames :: Package SourceRange -> Parser Bindings
+topLevelNames (Package _ _ _) = undefined
+  -- do mapM postprocess decls
+  --    getCurrentBindings
+
+  -- filterExported
+--  An identifier may be exported to permit access to it from another package. An identifier is exported if both:
+
+-- All other identifiers are not exported.
+-- Each package has a package block containing all Go source text for that package.
+
+makeImportBindings :: (Bindings, Bindings) -> Text -> Binding -> (Bindings, Bindings)
+makeImportBindings = undefined
+
+
+
 
 postprocessFunctions :: TopLevel SourceRange
                      -> Parser (TopLevel SourceRange)
@@ -267,22 +325,7 @@ instance Postprocess (ReturnList SourceRange) where
     NamedReturnList a nps  -> NamedReturnList a <$> postprocess nps
     AnonymousReturnList a aps -> AnonymousReturnList a <$> postprocess aps
 
--- An identifier is exported iff:
--- 1) the first character of the identifier's name is a Unicode upper
--- case letter (Unicode class "Lu"); and
--- 2) the identifier is declared in the package block or it is a field
--- name or method name.
-isExported :: Text -> Binding -> Bool
-isExported n bind | not (bind^.bindingImported) = generalCategory (T.head n) == UppercaseLetter
-isExported _ _                                  = False
-  
-topLevelNames :: Package SourceRange -> Parser Bindings
-topLevelNames (Package _ _ _) = undefined
-  -- do mapM postprocess decls
-  --    getCurrentBindings
 
-instance Postprocess (ImportDecl SourceRange) where
-  postprocess (ImportDecl a ispecs) = ImportDecl a <$> mapM postprocess ispecs
 
 instance Postprocess (TopLevel SourceRange) where
   postprocess tl = case tl of
@@ -337,14 +380,7 @@ instance Postprocess (FieldDecl SourceRange) where
     --                          >> return ()
     -- _                        -> return ()
 
-instance Postprocess (ImportSpec SourceRange) where
-  postprocess i@(Import _ itype path) =
-    lookupImport path >>=
-    \case Nothing -> unexpected (i^.ann) $ "Could not find the source for the package \"" ++ show path ++ "\""
-          Just prg@(Package _ _ _) ->
-            do exports <- newScope $ postprocess prg >> getCurrentBindings
-               let (package, global) = undefined --HM.foldlWithKey' makeImportBindings (emptyBindings, emptyBindings) exports
-               undefined
+
 
 instance Postprocess (Statement SourceRange) where
   postprocess s = case s of
@@ -418,27 +454,9 @@ instance Postprocess (Receiver SourceRange) where
 instance Postprocess (Element SourceRange) where
   postprocess = undefined
 
-makeImportBindings :: (Bindings, Bindings) -> Text -> Binding -> (Bindings, Bindings)
-makeImportBindings = undefined
-
--- exportBindingTransform :: (Text, Binding) -> (Text, Binding)
--- exportBindingTransform (n, bind) =
---                      case (itype, bind) of
---                        (ImportAll, _) -> (n, bind.bindingImported .~ True)
---                        -- Field names are never imported with qualifiers
---                        (ImportQualified mpiname, Binding {_bindingKind = FieldOrMethodB _}) -> (n, bind.bindingImported .~ True)
---                        (ImportQualified mpiname, _)->
---                         (ImportedQualifiedB (fromMaybe pname mpiname) n, kr)
-
 unId :: Id a -> Text
 unId (Id _ _ t) = t 
             
--- filterExported
---  An identifier may be exported to permit access to it from another package. An identifier is exported if both:
-
-
--- All other identifiers are not exported.
--- Each package has a package block containing all Go source text for that package.
 
 -- | Declare a binding, checking whether it was already declared in
 -- this scope, and also recording it in the identifire. If the check
@@ -487,7 +505,7 @@ newScope p = do identifiers %= pushScope
                 rp <- p
                 identifiers %= fromJust . popScope
                 return rp
-
+                
 -- | remember the state of the top level scope, execute a parser, and
 -- restore the remembered state
 bracketScope :: Parser a -> Parser a
@@ -495,6 +513,10 @@ bracketScope p = do lexenv <- use identifiers
                     rp <- p
                     identifiers .= lexenv
                     return rp
+                    
+-- | Push a new scope in current lexenv, merge the given scope into it, and execute the parser in the new lexenv
+pushScopeMod :: Scope -> Parser a -> Parser a
+pushScopeMod s p = newScope $ modifyInnerScope (`HM.union` s) >> p 
 
 -- | Returns the tip of bindings stack
 getCurrentBindings :: Parser (HashMap Text Binding)

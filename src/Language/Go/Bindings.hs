@@ -60,6 +60,8 @@ pushScope (b :| rest) = (HM.map notThisContext b) :| b:rest
 
 popScope :: Bindings -> Maybe Bindings
 popScope = snd . NE.uncons
+
+emptyScope = HM.empty
                          
 predeclaredBindings :: HashMap Text Binding
 predeclaredBindings = HM.fromList $ map (second $ \k -> Binding fakeRange k True True) $  [("bool", TypeB Boolean)
