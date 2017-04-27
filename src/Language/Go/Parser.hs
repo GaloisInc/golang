@@ -9,7 +9,6 @@ module Language.Go.Parser (parsePackage
                           ,ParserAnnotation
                           ) where
 
-import Prelude hiding (readFile)
 import Language.Go.Parser.Ambiguous
 import Language.Go.AST
 import Language.Go.Parser.Lexer
@@ -19,6 +18,7 @@ import Language.Go.Bindings
 import Language.Go.Bindings.Types
 import Language.Go.Types
 
+import Prelude hiding (readFile)
 import System.IO (FilePath)
 import AlexTools (SourceRange(..), initialInput)
 import Data.Text (Text, unpack)
@@ -42,7 +42,7 @@ import System.FilePath
 import Data.List.NonEmpty (NonEmpty(..), (<|), nonEmpty)
 import qualified Data.List.NonEmpty as NE
 import Data.Traversable
-import Data.Bifunctor
+import Data.Bifunctor hiding (second)
 import Control.Arrow
 import Data.List (foldl', or)
 import Control.Applicative
@@ -266,8 +266,8 @@ topLevelBinding top = case top of
        let binding = mkBinding rng $ VarB mtype
        scope <- mkScopeM [(mname, binding)]
        return (scope, MethodDecl a recv (Id rng binding mname) params returns mbody)
-       -- TODO: add this binding to the method set of the receiver
-  TopDecl _ decl -> undefined
+       -- ^ TODO: add this binding to the method set of the receiver
+  TopDecl a decl -> liftM (second (TopDecl a) . swap) $ withScopeDiff $ postprocess decl
   _ -> unexpected top "Function and method declarations cannot be declared with an empty identifier"
 
 -- | Build a scope from a list of binding names, locations and
@@ -277,6 +277,9 @@ mkScopeM = foldM insBind emptyScope
   where insBind scope (bn, bind) =
           do when (bn `HM.member` scope) $ unexpected (getRange bind) $ "Duplicate binding for " ++ (unpack bn)
              return $ HM.insert bn bind scope
+
+swap :: (a, b) -> (b, a)
+swap (a, b) = (b, a)
 
 -- | Returns the name of an identifier. Fails with an error if it's blank
 getIdName :: Id SourceRange -> Parser Text
@@ -329,6 +332,14 @@ topLevelNames (Package _ _ _) = undefined
 makeImportBindings :: (Bindings, Bindings) -> Text -> Binding -> (Bindings, Bindings)
 makeImportBindings = undefined
 
+-- | Evaluate a parser, returning the result, and the difference in
+-- bindings in the tip of the bindings scope before and after the
+-- evaluation.
+withScopeDiff :: Parser a -> Parser (a, Scope)
+withScopeDiff p = do s <- getCurrentBindings
+                     a <- p
+                     s' <- getCurrentBindings
+                     return (a, HM.difference s' s)
 
 postprocessFunctions :: TopLevel SourceRange
                      -> Parser (TopLevel SourceRange)
@@ -418,7 +429,6 @@ instance Postprocess (FieldDecl SourceRange) where
     -- NamedFieldDecl _ ids _ _ -> sequence (NE.map (declareBinding Field) ids)
     --                          >> return ()
     -- _                        -> return ()
-
 
 
 instance Postprocess (Statement SourceRange) where
@@ -558,7 +568,7 @@ pushScopeMod :: Scope -> Parser a -> Parser a
 pushScopeMod s p = newScope $ modifyInnerScope (`HM.union` s) >> p 
 
 -- | Returns the tip of bindings stack
-getCurrentBindings :: Parser (HashMap Text Binding)
+getCurrentBindings :: Parser Scope
 getCurrentBindings = uses identifiers NE.head
 
 -- | Modify just the inner scope
