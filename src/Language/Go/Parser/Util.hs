@@ -133,3 +133,6 @@ instance Ranged (Declaration SourceRange) where
 
 instance Ranged (MethodSpec SourceRange) where
   getRange x = Just $ x^.ann
+
+instance Ranged Binding where
+  getRange b = Just $ b^.bindingDeclLoc

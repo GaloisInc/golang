@@ -35,12 +35,12 @@ defaultBindings = predeclaredBindings :| []
 -- declareBindingId (BlankId _) _ = id
 -- declareBindingId id@(Id _ _ ident) bk = declareBinding ident 
 
-mkBinding :: Ranged r => Text -> r -> BindingKind -> Binding
-mkBinding n r bk = Binding {_bindingDeclLoc = range r
-                           ,_bindingKind = bk
-                           ,_bindingImported = False
-                           ,_bindingThisScope = True
-                           }
+mkBinding :: Ranged r => r -> BindingKind -> Binding
+mkBinding r bk = Binding {_bindingDeclLoc = range r
+                         ,_bindingKind = bk
+                         ,_bindingImported = False
+                         ,_bindingThisScope = True
+                         }
 
 declareBinding :: Text -> Binding -> Bindings -> Bindings
 declareBinding ident bind (b :| bs) = HM.insert ident bind b :| bs
@@ -62,7 +62,9 @@ popScope :: Bindings -> Maybe Bindings
 popScope = snd . NE.uncons
 
 emptyScope = HM.empty
-                         
+
+
+
 predeclaredBindings :: HashMap Text Binding
 predeclaredBindings = HM.fromList $ map (second $ \k -> Binding fakeRange k True True) $  [("bool", TypeB Boolean)
   ,("uint8", TypeB $ Int (Just 8) False)

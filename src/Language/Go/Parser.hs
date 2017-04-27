@@ -121,7 +121,6 @@ disambiguate e = case e of
           else unexpected fident $ "Identifier " ++ (T.unpack fname) ++ " not exported from package " ++ (T.unpack pname)
         _                   -> return e
       BlankId {}  -> unexpected ident "Reading from a blank identifier"
-      _ -> undefined
   CallExpr a fn mtype args mspread ->
        do -- 1. disambiguate arguments to see if the first argument is
           -- actually a type
@@ -188,8 +187,7 @@ class Postprocess a where
   -- 3. Infer/check types
   postprocess :: a -> Parser a
 
--- | This instance will record only the bindings exported from the
--- package. 
+-- | This is the second
 instance Postprocess (Package SourceRange) where
   postprocess pkg@(Package a pname files) =
     do -- 1. Initialize scope with the predefined type/var bindings
@@ -198,36 +196,46 @@ instance Postprocess (Package SourceRange) where
        newScope $ do 
          -- 3. Analyse the bindings due to top-level declarations and
          -- make a map of imported bindings for each file.
-         (topLevelBinds, importBindMap) <- topLevelBindings pkg
+         (annotatedFiles, topLevelBinds, importBindMap) <- topLevelBindings pkg
          -- 4. Traverse and postprocess each file
-         (Package a pname) <$> mapM (postprocessFile topLevelBinds importBindMap) files
+         (Package a pname) <$> mapM (postprocessFile topLevelBinds importBindMap) annotatedFiles
 
--- | Returns the top-level bindings (top-level declarations and map of imported bindings for each file) for a given package
-topLevelBindings :: Package SourceRange -> Parser (Scope, HashMap Text Scope)
+-- | Annotates and returns the top-level bindings (top-level
+-- declarations and map of imported bindings for each file) for a
+-- given package
+topLevelBindings :: Package SourceRange
+                 -> Parser (NonEmpty (File SourceRange), Scope, HashMap Text Scope)
 topLevelBindings (Package _ _ files) =
-  let processFile :: File SourceRange -> Parser (Text, Scope, Scope)
-      processFile f = do (tops, imps) <- collectFileTopLevelBindings f
-                         return (fileName f, tops, imps)
-      mergeResults :: (Scope, HashMap Text Scope)
-                   -> (Text, Scope, Scope)
+  let processFile :: File SourceRange
+                  -> Parser (File SourceRange, Scope, Scope)
+      processFile f =
+        do (f', tops, imps) <- annotateAndCollectFileTopLevelBindings f
+           return (f', tops, imps)
+      mergeScopes :: (Scope, HashMap Text Scope)
+                   -> (File SourceRange, Scope, Scope)
                    -> (Scope, HashMap Text Scope)
-      mergeResults (curTops, curImpMap) (fname, tops, imps) =
-        (HM.union curTops tops, HM.insert fname imps curImpMap)
-  in  do xs <- mapM processFile $ NE.toList files
-         return $ foldl mergeResults (emptyScope, HM.empty) xs
+      mergeScopes (curTops, curImpMap) (file, tops, imps) =
+        (HM.union curTops tops, HM.insert (fileName file) imps curImpMap)
+  in  do xs <- mapM processFile files
+         let files' = NE.map (\(f, _, _) -> f) xs
+         let (topLevelScope, importScopes) =
+               foldl mergeScopes (emptyScope, HM.empty) xs
+         return (files', topLevelScope, importScopes)
 
--- | Returns the bindings for this file's imports and its top-level
--- declarations.
-collectFileTopLevelBindings :: File SourceRange -> Parser (Scope, Scope)
-collectFileTopLevelBindings (File _ _ _ imports tops)  =
-  bracketScope $ do 
-     -- 1. Get bindings to current file imports
-     importBinds <- liftM HM.unions $ mapM getImports imports
+-- | Annotates and returns the bindings for this file's imports and
+-- its top-level declarations.
+annotateAndCollectFileTopLevelBindings :: File SourceRange
+                                       -> Parser (File SourceRange, Scope, Scope)
+annotateAndCollectFileTopLevelBindings (File rng name pname imports tops)  =
+  bracketScope $ do
+     -- 1. Get bindings to current file imports and annotate the
+     -- relevant AST subtrees
+     (importBinds, imports') <- liftM ((HM.unions *** id) . unzip) $ mapM processImports imports
      -- and bring them into scope
-     topLevelBinds <- pushScopeMod importBinds $
+     (topLevelBinds, tops') <- pushScopeMod importBinds $
           -- 2. Get the top-level bindings
-          newScope $ liftM HM.unions $ mapM topLevelBinding tops
-     return (topLevelBinds, importBinds)
+          newScope $ liftM ((HM.unions *** id) . unzip) $ mapM topLevelBinding tops
+     return (File rng name pname imports' tops', topLevelBinds, importBinds)
 
 -- | Bring top-level bindings for the file in scope, then postprocess the file
 postprocessFile :: Scope -> HashMap Text Scope -> File SourceRange -> Parser (File SourceRange)
@@ -236,16 +244,51 @@ postprocessFile topLevelDecls importsMap (File a fname pname imports topLevels) 
   pushScopeMod topLevelDecls $
   (File a fname pname imports) <$> mapM postprocessFunctions topLevels
 
--- | Returns the top-level bindings corresponding to a top-level declaration
-topLevelBinding :: TopLevel SourceRange -> Parser Scope
+-- | Returns the top-level bindings corresponding to a top-level
+-- declaration, while annotating the identifiers with the bindings as
+-- well.
+topLevelBinding :: TopLevel SourceRange -> Parser (Scope, TopLevel SourceRange)
 topLevelBinding top = case top of
-  _ -> undefined
+  FunctionDecl a (Id rng _ fname) params returns mbody ->
+    do ptypes <- getParamTypes params
+       mstype <- getSpreadType params
+       rtypes <- getReturnTypes returns
+       let ftype = Function Nothing ptypes mstype rtypes
+       let binding = mkBinding rng $ VarB ftype
+       scope <- mkScopeM [(fname, binding)]
+       return (scope, FunctionDecl a (Id rng binding fname) params returns mbody)
+  MethodDecl   a recv (Id rng _ mname) params returns mbody ->
+    do ptypes <- getParamTypes params
+       mstype <- getSpreadType params
+       rtypes <- getReturnTypes returns
+       rtype  <- getReceiverType recv
+       let mtype = Function (Just rtype) ptypes mstype rtypes
+       let binding = mkBinding rng $ VarB mtype
+       scope <- mkScopeM [(mname, binding)]
+       return (scope, MethodDecl a recv (Id rng binding mname) params returns mbody)
+       -- TODO: add this binding to the method set of the receiver
+  TopDecl _ decl -> undefined
+  _ -> unexpected top "Function and method declarations cannot be declared with an empty identifier"
 
--- | Returns the imported bindings for a given import declaration
-getImports :: ImportDecl SourceRange -> Parser Scope
-getImports (ImportDecl _ ispecs) =
-  bracketScope $ liftM HM.unions $ mapM getImportsS ispecs
-  where getImportsS :: ImportSpec SourceRange -> Parser Scope
+-- | Build a scope from a list of binding names, locations and
+-- kinds. If any of names are duplicated, raise an error.
+mkScopeM :: [(Text, Binding)] -> Parser Scope
+mkScopeM = foldM insBind emptyScope
+  where insBind scope (bn, bind) =
+          do when (bn `HM.member` scope) $ unexpected (getRange bind) $ "Duplicate binding for " ++ (unpack bn)
+             return $ HM.insert bn bind scope
+
+-- | Returns the name of an identifier. Fails with an error if it's blank
+getIdName :: Id SourceRange -> Parser Text
+getIdName i = case i of
+  Id a _ name -> return name
+  BlankId rng -> unexpected rng "Identifier cannot be blank"
+
+-- | Annotates and returns the imported bindings for a given import declaration
+processImports :: ImportDecl SourceRange -> Parser (Scope, ImportDecl SourceRange)
+processImports (ImportDecl rng ispecs) =
+  bracketScope $ liftM ((HM.unions *** (ImportDecl rng)) . unzip) $ mapM getImportsS ispecs
+  where getImportsS :: ImportSpec SourceRange -> Parser (Scope, ImportSpec SourceRange)
         getImportsS i@(Import _ itype path) =
           lookupImport path >>=
           \case Nothing -> unexpected (i^.ann) $ "Could not find the source for the package \"" ++ show path ++ "\""
@@ -287,8 +330,6 @@ makeImportBindings :: (Bindings, Bindings) -> Text -> Binding -> (Bindings, Bind
 makeImportBindings = undefined
 
 
-
-
 postprocessFunctions :: TopLevel SourceRange
                      -> Parser (TopLevel SourceRange)
 postprocessFunctions tl = case tl of
@@ -324,8 +365,6 @@ instance Postprocess (ReturnList SourceRange) where
   postprocess rl = case rl of
     NamedReturnList a nps  -> NamedReturnList a <$> postprocess nps
     AnonymousReturnList a aps -> AnonymousReturnList a <$> postprocess aps
-
-
 
 instance Postprocess (TopLevel SourceRange) where
   postprocess tl = case tl of
@@ -464,7 +503,7 @@ unId (Id _ _ t) = t
 -- thrown.
 declareBindingIdM :: Id SourceRange -> BindingKind -> Parser (Id SourceRange)
 declareBindingIdM (Id rng _ ident) bk =
-  let bind = mkBinding ident rng bk in
+  let bind = mkBinding rng bk in
   declareBindingM ident bind >> return (Id rng bind ident)
 declareBindingIdM ident@(BlankId _)    _  = return ident
 
