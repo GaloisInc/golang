@@ -624,11 +624,11 @@ typeclause :: {TypeClause SourceRange}
 
 forclause :: {ForClause SourceRange}
   -- condition and forclause case
-  : revForClauseGuards block {%
+  : revForClauseGuards {%
       case $1 of {
-        (Just (ExpressionStmt _ e)) :| [] -> return (pos (e, $2) ForClause Nothing (Just e) Nothing) ;
-        ms2 :| [Just (ExpressionStmt _ e), ms1] -> return (pos ((ms1, e), $2) ForClause ms1 (Just e) ms2) ;
-        ms2 :| [Nothing, ms1] -> return (pos ((ms1, ms2), $2) ForClause ms1 Nothing ms2);
+        (Just (ExpressionStmt _ e)) :| [] -> return (pos e ForClause Nothing (Just e) Nothing) ;
+        ms2 :| [Just (ExpressionStmt _ e), ms1] -> return (pos (ms1, e) ForClause ms1 (Just e) ms2) ;
+      ms2 :| [Nothing, ms1] -> return (pos (ms1, ms2) ForClause ms1 Nothing ms2);
         _ -> unexpected (NE.reverse $1) "Format of the for statement clause"
       }
     }
