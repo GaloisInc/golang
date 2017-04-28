@@ -18,7 +18,6 @@ import Language.Go.Bindings
 import Language.Go.Bindings.Types
 import Language.Go.Types
 
-import Prelude hiding (readFile)
 import System.IO (FilePath)
 import AlexTools (SourceRange(..), initialInput)
 import Data.Text (Text, unpack)
@@ -28,29 +27,28 @@ import Control.Monad.State.Strict
 import Control.Monad.Except
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
-import Data.Maybe (fromMaybe, fromJust, isNothing, maybeToList)
+import Data.Maybe (fromJust, isNothing, maybeToList)
 import Control.Monad.Trans (lift)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader
 import Control.Monad (liftM, unless)
 import Lens.Simple
 import Data.Default.Class
-import Data.Semigroup
 import System.Environment (lookupEnv)
 import System.Directory
 import System.FilePath
-import Data.List.NonEmpty (NonEmpty(..), (<|), nonEmpty)
+import Data.List.NonEmpty (NonEmpty(..), nonEmpty)
 import qualified Data.List.NonEmpty as NE
-import Data.Traversable
 import Data.Bifunctor hiding (second)
-import Control.Arrow
-import Data.List (foldl', or)
+import Control.Arrow ( (***), second )
 import Control.Applicative
 import Data.Char (generalCategory, GeneralCategory (..))
 import Data.Generics.Uniplate.Data
 
+import Prelude hiding ( readFile )
+import Debug.Trace
 
 -- | We don't resolve types for now, so all bindings are typed with this type
+noType :: VarType
 noType = Nil
 
 runParser :: Parser a -> IO (Either (SourceRange, String) a)
@@ -113,7 +111,7 @@ liftHappy = either throwError return
 --   from a function that does a recursive traversal.
 disambiguate :: Expression SourceRange -> Parser (Expression SourceRange)
 disambiguate e = case e of
-  FieldSelector a (Name na Nothing ident) fident@(Id _ _ fname) ->
+  FieldSelector a (Name _na Nothing ident) fident@(Id _ _ fname) ->
     case ident of
       Id _ bind pname -> case bind^.bindingKind of
         PackageB _ pexports ->
@@ -125,10 +123,10 @@ disambiguate e = case e of
        do -- 1. disambiguate arguments to see if the first argument is
           -- actually a type
           (mtype', args') <- case args of
-            (a:as) -> case a of
+            (arg:rest) -> case arg of
               Name _ mqual ident ->
                 do (mtype'', mexp) <- disambiguateFirstTypeParam mtype mqual ident
-                   return (mtype'', (maybeToList mexp) ++ as)
+                   return (mtype'', (maybeToList mexp) ++ rest)
               _                  -> return (mtype, args)
             [] -> return (mtype, args)
           let call' = CallExpr a fn mtype' args' mspread
@@ -189,11 +187,11 @@ class Postprocess a where
 
 -- | This is the second
 instance Postprocess (Package SourceRange) where
-  postprocess pkg@(Package a pname files) =
+  postprocess pkg@(Package a pname _files) =
     do -- 1. Initialize scope with the predefined type/var bindings
        identifiers .= defaultBindings
        -- 2. with a new scope, for each file
-       newScope $ do 
+       newScope $ do
          -- 3. Analyse the bindings due to top-level declarations and
          -- make a map of imported bindings for each file.
          (annotatedFiles, topLevelBinds, importBindMap) <- topLevelBindings pkg
@@ -214,8 +212,8 @@ topLevelBindings (Package _ _ files) =
       mergeScopes :: (Scope, HashMap Text Scope)
                    -> (File SourceRange, Scope, Scope)
                    -> (Scope, HashMap Text Scope)
-      mergeScopes (curTops, curImpMap) (file, tops, imps) =
-        (HM.union curTops tops, HM.insert (fileName file) imps curImpMap)
+      mergeScopes (curTops, curImpMap) (curFile, tops, imps) =
+        (HM.union curTops tops, HM.insert (fileName curFile) imps curImpMap)
   in  do xs <- mapM processFile files
          let files' = NE.map (\(f, _, _) -> f) xs
          let (topLevelScope, importScopes) =
@@ -282,24 +280,26 @@ swap :: (a, b) -> (b, a)
 swap (a, b) = (b, a)
 
 -- | Returns the name of an identifier. Fails with an error if it's blank
-getIdName :: Id SourceRange -> Parser Text
-getIdName i = case i of
-  Id a _ name -> return name
-  BlankId rng -> unexpected rng "Identifier cannot be blank"
+-- getIdName :: Id SourceRange -> Parser Text
+-- getIdName i = case i of
+--   Id _a _ name -> return name
+--   BlankId rng -> unexpected rng "Identifier cannot be blank"
 
 -- | Annotates and returns the imported bindings for a given import declaration
 processImports :: ImportDecl SourceRange -> Parser (Scope, ImportDecl SourceRange)
 processImports (ImportDecl rng ispecs) =
   bracketScope $ liftM ((HM.unions *** (ImportDecl rng)) . unzip) $ mapM getImportsS ispecs
   where getImportsS :: ImportSpec SourceRange -> Parser (Scope, ImportSpec SourceRange)
-        getImportsS i@(Import _ itype path) =
+        getImportsS i@(Import _ _itype path) =
           lookupImport path >>=
           \case Nothing -> unexpected (i^.ann) $ "Could not find the source for the package \"" ++ show path ++ "\""
                 Just pack@(Package _ _ _) ->
                   do exports <- newScope $ postprocess pack >> getCurrentBindings
-                     let (package, global) = undefined --HM.foldlWithKey' makeImportBindings (emptyBindings, emptyBindings) exports
-                     undefined
+                     -- Question: why the breakdown here?  Is there anything required beyond just filtering for
+                     -- exported names?
+                     return (HM.filterWithKey isExported exports, i)
 
+--                     let (package, global) = undefined -- HM.foldlWithKey' makeImportBindings (emptyBindings, emptyBindings) exports
 
 -- exportBindingTransform :: (Text, Binding) -> (Text, Binding)
 -- exportBindingTransform (n, bind) =
@@ -419,10 +419,10 @@ instance Postprocess (VarSpec SourceRange) where
 
 instance Postprocess (ConstSpec SourceRange) where
   -- TODO: we need to know the context (type) of the previous const specs here
-  postprocess (ConstSpec a idents mrhs) =
+  postprocess (ConstSpec _a _idents mrhs) =
     case mrhs of
       Nothing -> undefined
-      Just (mtype, inits) -> undefined
+      Just _ -> undefined
 
 -- | Note that fields don't introduce names into the global namespace, so we
 -- don't modify that global environment here.  We *do* have to traverse the
@@ -443,8 +443,8 @@ instance Postprocess (Statement SourceRange) where
          unless atLeastOneNew $ unexpected s "Short variable declaration that doesn't declare new variables"
          unless (NE.length idents == NE.length inits) $ unexpected s "The number of initializers doesn't match the number of variable declared"
          inits' <- mapM postprocess inits
-         idents' <- mapM (\(ident, init) -> do
-                            VarB <$> getType init >>= declareBindingIdM ident) $ NE.zip idents inits'
+         idents' <- mapM (\(ident, initEx) -> do
+                            VarB <$> getType initEx >>= declareBindingIdM ident) $ NE.zip idents inits'
          return (ShortVarDeclStmt a idents' inits')
     BlockStmt a stmts -> newScope (BlockStmt a <$> postprocess stmts)
     IfStmt a mguard e then_ else_ -> newScope $ do
@@ -461,7 +461,7 @@ instance Postprocess (Statement SourceRange) where
         ForRange a' aord e -> do
           fc' <- ForRange a' <$> postprocess aord <*> postprocess e
           ForStmt a fc' <$> newScope (mapM postprocess body)
-    LabeledStmt a l s -> LabeledStmt a l <$> postprocess s
+    LabeledStmt a l ls -> LabeledStmt a l <$> postprocess ls
     AssignStmt a lhs op rhs -> AssignStmt a <$> mapM postprocess lhs <*> pure op <*> mapM postprocess rhs
     DeclStmt a d -> DeclStmt a <$> postprocess d
     ExpressionStmt a e -> ExpressionStmt a <$> postprocess e
@@ -476,6 +476,7 @@ instance Postprocess (Statement SourceRange) where
     EmptyStmt {} -> pure s
     GotoStmt {} -> pure s
 
+nonBlankId :: Id a -> Bool
 nonBlankId i = case i of
   Id {} -> True
   BlankId _ -> False
@@ -483,7 +484,7 @@ nonBlankId i = case i of
 instance Postprocess (Expression SourceRange) where
   postprocess e =
     let mpp = case e of
-          FunctionLit a params returns body -> error "unsupported expression"
+          FunctionLit {} -> error "unsupported expression"
           CompositeLit a ty els -> CompositeLit a <$> postprocess ty <*> mapM postprocess els
           MethodExpr a recv ident -> MethodExpr a <$> postprocess recv <*> postprocess ident
           CallExpr a fne mty args mvariadic -> CallExpr a <$> postprocess fne <*> postprocess mty <*> mapM postprocess args <*> sequence (postprocess <$> mvariadic)
@@ -492,12 +493,12 @@ instance Postprocess (Expression SourceRange) where
           -- that qualifier is bound to a package name and ident is
           -- bound to a var or const exported from it
           BinaryExpr a op left right -> BinaryExpr a op <$> postprocess left <*> postprocess right
-          UnaryExpr a op e -> UnaryExpr a op <$> postprocess e
-          Conversion a ty e -> Conversion a <$> postprocess ty <*> postprocess e
-          FieldSelector a e fname -> FieldSelector a <$> postprocess e <*> postprocess fname
+          UnaryExpr a op ue -> UnaryExpr a op <$> postprocess ue
+          Conversion a ty ce -> Conversion a <$> postprocess ty <*> postprocess ce
+          FieldSelector a se fname -> FieldSelector a <$> postprocess se <*> postprocess fname
           IndexExpr a base index -> IndexExpr a <$> postprocess base <*> postprocess index
           SliceExpr a base me1 me2 me3 -> SliceExpr a <$> postprocess base <*> postprocess me1 <*> postprocess me2 <*> postprocess me3
-          TypeAssertion a e ty -> TypeAssertion a <$> postprocess e <*> postprocess ty
+          TypeAssertion a ae ty -> TypeAssertion a <$> postprocess ae <*> postprocess ty
           _ -> return e
     in  mpp >>= disambiguate
 
@@ -547,18 +548,14 @@ instance Postprocess (Receiver SourceRange) where
 instance Postprocess (Element SourceRange) where
   postprocess e =
     case e of
-      Element a e -> Element a <$> postprocess e
-      KeyedEl a k e -> KeyedEl a <$> postprocess k <*> postprocess e
+      Element a elEx -> Element a <$> postprocess elEx
+      KeyedEl a k elEx -> KeyedEl a <$> postprocess k <*> postprocess elEx
 
 instance Postprocess (Key SourceRange) where
   postprocess k =
     case k of
       FieldKey a fk -> FieldKey a <$> postprocess fk
       ExprKey a ek -> ExprKey a <$> postprocess ek
-
-unId :: Id a -> Text
-unId (Id _ _ t) = t 
-            
 
 -- | Declare a binding, checking whether it was already declared in
 -- this scope, and also recording it in the identifire. If the check
