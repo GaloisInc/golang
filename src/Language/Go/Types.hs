@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable, FlexibleContexts, FlexibleInstances, StandaloneDeriving, LambdaCase #-}
+{-# LANGUAGE DeriveDataTypeable, FlexibleContexts, FlexibleInstances, StandaloneDeriving, LambdaCase, TupleSections #-}
 -- | 'Resolved' type representations and inference/checking
 module Language.Go.Types where
 
@@ -12,6 +12,7 @@ import Control.Monad (unless, liftM)
 import Control.Applicative
 import Data.Map (Map)
 import Data.Text (Text)
+import Control.Arrow
 
 class Typed a where
   getType :: MonadError (SourceRange, String) m => a -> m VarType
@@ -47,11 +48,83 @@ getExprType e = case e of
                           return lt
            Multiply -> do assertTypeIdentity (left, right) lt rt
                           return lt
-           _ -> unexpected e $ "Type analysis is not implemented for binary operator " ++ show op
-    UnaryExpr  _ op operand    -> do ot <- getExprType operand
-                                     -- assertTypeP (isInteger .||. isFloat) ot
-                                     return ot
+           -- FIXME: rhs of shifts is actually required to be uint or
+           -- a constant representable by uint
+           LeftShift  -> if isInteger lt && isInteger rt then return lt
+                         else unexpected e $ "Shift expressions require integer operands"
+           RightShift -> if isInteger lt && isInteger rt then return lt
+                         else unexpected e $ "Shift expressions require integer operands"
+           BitwiseXOr -> if isInteger lt && isInteger rt then return lt
+                         else unexpected e $ "Shift expressions require integer operands"
+           BitwiseOr  -> if isInteger lt && isInteger rt then return lt
+                         else unexpected e $ "Shift expressions require integer operands"
+           _ -> unexpected e $ "Type analysis has not yet been implemented for the binary operator " ++ show op
+    UnaryExpr  _ op operand -> do ot <- getExprType operand
+                                  -- assertTypeP (isInteger .||. isFloat) ot
+                                  return ot
+                                     
+    IndexExpr _ base index ->
+      do btype <- getExprType base
+         itype <- getExprType index
+         liftM VarType $ getIndexedElementType e btype itype
+                                  
+    CompositeLit _ litType elements ->
+      getType litType >>= underlyingType litType >>= (return . VarType)
+         -- The LiteralType's underlying type must be a struct, array,
+         -- slice, or map type (the grammar enforces this constraint
+         -- except when the type is given as a TypeName)
+
+         -- FIXME: typecheck the types of elements
+         -- case lty of
+         --   -- For struct literals the following rules apply:
+         --   -- 1. A key must be a field name declared in the struct type.
+         --   -- 2. An element list that does not contain any keys must
+         --   -- list an element for each struct field in the order in
+         --   -- which the fields are declared.
+         --   -- 3. If any element has a key, every element must have a key.
+         --   -- 4. An element list that contains keys does not need to
+         --   -- have an element for each struct field. Omitted fields
+         --   -- get the zero value for that field.
+         --   -- 5. A literal may omit the element list; such a literal
+         --   -- evaluates to the zero value for its type.
+         --   -- 6. It is an error to specify an element for a
+         --   -- non-exported field of a struct belonging to a different
+         --   -- package.
+         --   Struct fields -> unexpected litType $ "Struct type analysis is not implemented"
+         --   -- An element with a key uses the key as its index. The key
+         --   -- must be a non-negative constant representable by a value
+         --   -- of type int; and if it is typed it must be of integer
+         --   -- type.
+         --   -- FIXME: support for array literals with types that don't
+         --   -- specify size: inferring size from the maximum index (can
+         --   -- be different from the lenght of the litral)
+         --   Array (Just (IntLit _ len)) eltype -> undefined
     _ -> unexpected e "Expression not supported"
+
+getIndexedElementType :: (Ranged r, MonadError (SourceRange, String) m) => r -> ExprType -> ExprType -> m VarType
+getIndexedElementType rng btype itype =
+  let baseTypeErr = unexpected rng $ "Indexing on a non-array value"
+      indexTypeErr = unexpected rng $ "Incompatible index type"
+  in case btype of
+    ConstType cty -> case cty of
+      CString t -> if isInteger itype then return runeType else indexTypeErr
+      _ -> baseTypeErr
+    VarType vty -> case vty of
+      Array _ elt -> if isInteger itype then return elt else indexTypeErr
+      Slice elt ->   if isInteger itype then return elt else indexTypeErr
+      String ->      if isInteger itype then return runeType else indexTypeErr
+      Map ktype vtype ->
+        if itype `assignableTo` ktype then return vtype else indexTypeErr
+      Pointer ptype -> getIndexedElementType rng (VarType ptype) itype
+      _ -> baseTypeErr
+
+getLiteralElementTypes :: (MonadError (SourceRange, String) m)
+                       => Element SourceRange -> m (Maybe ExprType, ExprType)
+getLiteralElementTypes elt = case elt of
+  Element _ e -> do et <- getExprType e
+                    return (Nothing, et)
+  -- KeyedEl _ k v -> (,) <$> (Just <$> getKeyType k) <*> getExprType v
+
 
 (.&&.) :: (a -> Bool) -> (a -> Bool) -> a -> Bool
 (.&&.) = liftA2 (&&)
@@ -151,14 +224,28 @@ assignableTo from to =
     ConstType ct -> representableBy ct to
 
 
--- | Whether a constant can be represented by a particular variable type
+-- | Whether a constant can be represented by a particular variable
+-- type. FIXME: fill in the remaining cases for const types. Also
+-- check that the constant values fit in the bitwidths.
 representableBy :: ConstType -> VarType -> Bool
 representableBy (CInt _) vt = isInteger (VarType vt)
+representableBy (CFloat f) vt =
+  if isFloat (VarType vt) then True
+  else if isInteger (VarType vt) then
+          let (whole, fraction) = properFraction f
+          in  fraction == 0 && representableBy (CInt whole) vt
+       else False
 
 isInteger :: ExprType -> Bool
 isInteger etype = case etype of
   VarType (Int _ _) -> True
   ConstType (CInt _) -> True
+  _ -> False
+
+isFloat :: ExprType -> Bool
+isFloat etype = case etype of
+  VarType (Float _) -> True
+  ConstType (CFloat _) -> True
   _ -> False
 
 getParamTypes :: MonadError (SourceRange, String) m
@@ -245,6 +332,7 @@ deriving instance Eq Binding
 -- locations should be the same.
 typeNamesIdentical :: TypeName a -> TypeName a -> Bool
 typeNamesIdentical (TypeName _ _ (Id _ bind1 name1)) (TypeName _ _ (Id _ bind2 name2)) = name1 == name2 && (bind1^.bindingDeclLoc == bind2^.bindingDeclLoc)
+typeNamesIdentical _ _ = False
 
 -- | Remove all the unknown bitwidths from types
 specializeType :: Int {- ^ Machine word width in bits -} -> VarType -> VarType
@@ -258,3 +346,12 @@ specializeInt machineWordSize ty = case ty of
 -- | FIXME: implement this. Returns True when a given var type implements an interface specification (given by a hashmap of fields and types)
 implements :: VarType -> Map Text VarType -> Bool
 implements _ _ = error "interface type analysis is not implemented yet"
+
+-- | For type aliases, returns the type it aliases to. Otherwise, returns the type
+underlyingType :: (Ranged r, MonadError (SourceRange, String) m)
+               => r -> VarType -> m VarType
+underlyingType r (Alias (TypeName _ _ (Id _ bk ident))) =
+  case bk^.bindingKind of
+    TypeB vt -> underlyingType r vt
+    _        -> unexpected r $ "Type alias " ++ show ident ++ " is not bound to a type"
+underlyingType _ t = return t
