@@ -248,24 +248,30 @@ postprocessFile topLevelDecls importsMap (File a fname pname imports topLevels) 
 topLevelBinding :: TopLevel SourceRange -> Parser (Scope, TopLevel SourceRange)
 topLevelBinding top = case top of
   FunctionDecl a (Id rng _ fname) params returns mbody ->
-    do ptypes <- getParamTypes params
-       mstype <- getSpreadType params
-       rtypes <- getReturnTypes returns
+    do params' <- postprocess params
+       ptypes <- getParamTypes params'
+       mstype <- getSpreadType params'
+       returns' <- postprocess returns
+       rtypes <- getReturnTypes returns'
        let ftype = Function Nothing ptypes mstype rtypes
        let binding = mkBinding rng $ VarB ftype
        scope <- mkScopeM [(fname, binding)]
-       return (scope, FunctionDecl a (Id rng binding fname) params returns mbody)
+       return (scope, FunctionDecl a (Id rng binding fname) params' returns' mbody)
   MethodDecl   a recv (Id rng _ mname) params returns mbody ->
-    do ptypes <- getParamTypes params
-       mstype <- getSpreadType params
-       rtypes <- getReturnTypes returns
-       rtype  <- getReceiverType recv
+    do params' <- postprocess params
+       ptypes <- getParamTypes params'
+       mstype <- getSpreadType params'
+       returns' <- postprocess returns
+       rtypes <- getReturnTypes returns'
+       recv' <- postprocess recv
+       rtype  <- getReceiverType recv'
        let mtype = Function (Just rtype) ptypes mstype rtypes
        let binding = mkBinding rng $ VarB mtype
        scope <- mkScopeM [(mname, binding)]
-       return (scope, MethodDecl a recv (Id rng binding mname) params returns mbody)
+       return (scope, MethodDecl a recv' (Id rng binding mname) params' returns' mbody)
        -- ^ TODO: add this binding to the method set of the receiver
-  TopDecl a decl -> liftM (second (TopDecl a) . swap) $ withScopeDiff $ postprocess decl
+  TopDecl a decl -> do
+    liftM (second (TopDecl a) . swap) $ withScopeDiff $ postprocess decl
   _ -> unexpected top "Function and method declarations cannot be declared with an empty identifier"
 
 -- | Build a scope from a list of binding names, locations and
