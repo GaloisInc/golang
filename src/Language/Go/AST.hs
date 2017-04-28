@@ -335,7 +335,7 @@ data VarType = Int (Maybe Int) {- ^ Bitwidth. Architecture-dependent if `Nothing
                [VarType] -- ^ Parameter types
                (Maybe  VarType) -- ^ Spread parameter
                [VarType] -- ^ Return types
-             | Array (Maybe (Expression (Maybe Binding))) VarType
+             | Array (Maybe (Expression ())) VarType
              | Struct (Map Text (VarType, Maybe Text))
              | Pointer VarType
              | Interface (Map Text VarType)

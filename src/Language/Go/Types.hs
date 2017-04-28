@@ -9,10 +9,14 @@ import Lens.Simple
 import Control.Monad.Error.Class
 import Language.Go.Parser.Util (unexpected, Ranged(..))
 import Control.Monad (unless, liftM)
+import Control.Applicative
 
 class Typed a where
   getType :: MonadError (SourceRange, String) m => a -> m VarType
 
+-- The following is a gross simplification that will only give correct
+-- results for (a subset of?) correct Go code. Actual Go type checking
+-- rules are more intricate and are not implemented fully right now.
 getExprType :: MonadError (SourceRange, String) m => Expression SourceRange -> m ExprType
 getExprType e = case e of
     IntLit _ i -> return $ ConstType $ CInt i
@@ -37,11 +41,31 @@ getExprType e = case e of
          case op of
            Add -> do assertTypeIdentity (left, right) lt rt
                      return lt
-    UnaryExpr  _ op operand    -> undefined
+           Subtract -> do assertTypeIdentity (left, right) lt rt
+                          return lt
+           Multiply -> do assertTypeIdentity (left, right) lt rt
+                          return lt
+           
+    UnaryExpr  _ op operand    -> do ot <- getExprType operand
+                                     -- assertTypeP (isInteger .||. isFloat) ot
+                                     return ot
     _ -> unexpected e "Expression not supported"
-               
+
+(.&&.) :: (a -> Bool) -> (a -> Bool) -> a -> Bool
+(.&&.) = liftA2 (&&)
+
+(.||.) :: (a -> Bool) -> (a -> Bool) -> a -> Bool
+(.||.) = liftA2 (||)
+
+-- -- | Assert a predicate on a type
+-- assertTypeP :: (MonadError (SourceRange, String) m) => Bool -> m ()
+-- assertTypeP b = if b then return () else throwError ""
+
 instance Typed (Expression SourceRange) where
   getType = liftM defaultType . getExprType
+
+-- | Returns 
+-- isInteger :: 
 
 assertTypeIdentity :: (MonadError (SourceRange, String) m, Ranged r)
                    => r -> ExprType -> ExprType -> m ()
@@ -55,7 +79,13 @@ instance Typed (Type SourceRange) where
                  case bind^.bindingKind of
                    TypeB st -> return st
                    _ -> unexpected rng "An identifier is used as a type name, but not bound to a type"
-    _ -> undefined
+    -- | Types without a constant integer length speficied aren't
+    -- supported right. Also, types without a specified length are
+    -- only valid in composite literals and should be handled there.
+    ArrayType _ mlen elt ->
+      do elty <- getType elt
+         return $ Array (fmap (reannotate (const ())) mlen) elty
+    _ -> unexpected t $ "Unsupported type " ++ show t
 
 instance Typed (NamedParameter SourceRange) where
   getType (NamedParameter _ _ ty) = getType ty
