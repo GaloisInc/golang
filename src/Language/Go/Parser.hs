@@ -526,18 +526,37 @@ instance Postprocess (CommClause SourceRange) where
   postprocess = error "Select statements are not supported"
 
 instance Postprocess (Type SourceRange) where
-  postprocess = transformBiM (postprocess :: Id SourceRange -> Parser (Id SourceRange))
+  postprocess t =
+    case t of
+      NamedType a tn -> NamedType a <$> postprocess tn
+      ArrayType a me et -> ArrayType a <$> mapM postprocess me <*> postprocess et
+      PointerType a pt -> PointerType a <$> postprocess pt
+      SliceType a st -> SliceType a <$> postprocess st
+      MapType a t1 t2 -> MapType a <$> postprocess t1 <*> postprocess t2
+      ChannelType a cd et -> ChannelType a cd <$> postprocess et
 
 instance Postprocess (Id SourceRange) where
   postprocess i = case i of
     Id rng _ name -> Id rng <$> (getBinding name rng) <*> pure name
     BlankId _     -> return i
 
+instance Postprocess (TypeName SourceRange) where
+  postprocess (TypeName a mpid tid) = TypeName a <$> mapM postprocess mpid <*> postprocess tid
+
 instance Postprocess (Receiver SourceRange) where
   postprocess = undefined
 
 instance Postprocess (Element SourceRange) where
-  postprocess = undefined
+  postprocess e =
+    case e of
+      Element a e -> Element a <$> postprocess e
+      KeyedEl a k e -> KeyedEl a <$> postprocess k <*> postprocess e
+
+instance Postprocess (Key SourceRange) where
+  postprocess k =
+    case k of
+      FieldKey a fk -> FieldKey a <$> postprocess fk
+      ExprKey a ek -> ExprKey a <$> postprocess ek
 
 unId :: Id a -> Text
 unId (Id _ _ t) = t 
