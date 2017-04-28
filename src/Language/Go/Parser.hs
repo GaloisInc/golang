@@ -424,12 +424,16 @@ instance Postprocess (ConstSpec SourceRange) where
       Nothing -> undefined
       Just (mtype, inits) -> undefined
 
+-- | Note that fields don't introduce names into the global namespace, so we
+-- don't modify that global environment here.  We *do* have to traverse the
+-- types embedded in field decls to update them with binding information.
 instance Postprocess (FieldDecl SourceRange) where
-  postprocess decl = undefined -- case decl of
-    -- NamedFieldDecl _ ids _ _ -> sequence (NE.map (declareBinding Field) ids)
-    --                          >> return ()
-    -- _                        -> return ()
-
+  postprocess decl =
+    case decl of
+      NamedFieldDecl a ids ty mtag ->
+        NamedFieldDecl a ids <$> postprocess ty <*> pure mtag
+      AnonymousFieldDecl a tname mtag ->
+        AnonymousFieldDecl a <$> postprocess tname <*> pure mtag
 
 -- FIXME: ShortVarDeclStmt in the initializer statement position of an If
 -- doesn't get traversed because there is no clause in the fallthrough case to
