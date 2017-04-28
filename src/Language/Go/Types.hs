@@ -48,6 +48,8 @@ getExprType e = case e of
                           return lt
            Multiply -> do assertTypeIdentity (left, right) lt rt
                           return lt
+           Divide -> do assertTypeIdentity (left, right) lt rt
+                        return lt
            -- FIXME: rhs of shifts is actually required to be uint or
            -- a constant representable by uint
            LeftShift  -> if isInteger lt && isInteger rt then return lt
@@ -57,6 +59,8 @@ getExprType e = case e of
            BitwiseXOr -> if isInteger lt && isInteger rt then return lt
                          else unexpected e $ "Shift expressions require integer operands"
            BitwiseOr  -> if isInteger lt && isInteger rt then return lt
+                         else unexpected e $ "Shift expressions require integer operands"
+           BitwiseAnd  -> if isInteger lt && isInteger rt then return lt
                          else unexpected e $ "Shift expressions require integer operands"
            _ -> unexpected e $ "Type analysis has not yet been implemented for the binary operator " ++ show op
     UnaryExpr  _ op operand -> do ot <- getExprType operand
