@@ -441,13 +441,11 @@ instance Postprocess (Statement SourceRange) where
   postprocess s = case s of
     ShortVarDeclStmt a idents inits ->
       do mbks <- mapM lookupBindingIdM $ NE.filter nonBlankId idents
-         traceM ("<<<<<<<<<looked up idents: " ++ show mbks)
          let atLeastOneNew = any isNothing mbks
          unless atLeastOneNew $ unexpected s "Short variable declaration that doesn't declare new variables"
          unless (NE.length idents == NE.length inits) $ unexpected s "The number of initializers doesn't match the number of variable declared"
          inits' <- mapM postprocess inits
          idents' <- mapM (\(ident, init) -> do
-                            traceM (">>>>>Declaring a ShortDecl ident: " ++ show ident)
                             VarB <$> getType init >>= declareBindingIdM ident) $ NE.zip idents inits'
          return (ShortVarDeclStmt a idents' inits')
     BlockStmt a stmts -> newScope (BlockStmt a <$> postprocess stmts)
