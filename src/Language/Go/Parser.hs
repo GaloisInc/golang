@@ -431,23 +431,54 @@ instance Postprocess (FieldDecl SourceRange) where
     -- _                        -> return ()
 
 
+-- FIXME: ShortVarDeclStmt in the initializer statement position of an If
+-- doesn't get traversed because there is no clause in the fallthrough case to
+-- descend through statements.  Adding one is problematic, because it visits
+-- things multiple times.
+--
+-- In fact, it seems to visit things multiple times already
 instance Postprocess (Statement SourceRange) where
   postprocess s = case s of
     ShortVarDeclStmt a idents inits ->
       do mbks <- mapM lookupBindingIdM $ NE.filter nonBlankId idents
+         traceM ("<<<<<<<<<looked up idents: " ++ show mbks)
          let atLeastOneNew = any isNothing mbks
          unless atLeastOneNew $ unexpected s "Short variable declaration that doesn't declare new variables"
          unless (NE.length idents == NE.length inits) $ unexpected s "The number of initializers doesn't match the number of variable declared"
          inits' <- mapM postprocess inits
-         idents' <- mapM (\(ident, init) ->
+         idents' <- mapM (\(ident, init) -> do
+                            traceM (">>>>>Declaring a ShortDecl ident: " ++ show ident)
                             VarB <$> getType init >>= declareBindingIdM ident) $ NE.zip idents inits'
          return (ShortVarDeclStmt a idents' inits')
-    _ -> descendBiM (postprocess :: Declaration SourceRange -> Parser (Declaration SourceRange)) s >>=
-         descendBiM (postprocess :: Expression SourceRange -> Parser (Expression SourceRange)) >>=
-         descendBiM (postprocess :: ExprClause SourceRange -> Parser (ExprClause SourceRange)) >>=
-         descendBiM (postprocess :: TypeClause SourceRange -> Parser (TypeClause SourceRange)) >>=
-         descendBiM (postprocess :: CommClause SourceRange -> Parser (CommClause SourceRange)) >>=
-         descendM postprocess
+    BlockStmt a stmts -> newScope (BlockStmt a <$> postprocess stmts)
+    IfStmt a mguard e then_ else_ -> newScope $ do
+      mguard' <- mapM postprocess mguard
+      e' <- postprocess e
+      then_' <- newScope (mapM postprocess then_)
+      else_' <- newScope (mapM postprocess else_)
+      return (IfStmt a mguard' e' then_' else_')
+    ForStmt a fc body ->
+      case fc of
+        ForClause a' mguard mexp minc -> newScope $ do
+          fc' <- ForClause a' <$> mapM postprocess mguard <*> mapM postprocess mexp <*> mapM postprocess minc
+          ForStmt a fc' <$> mapM postprocess body
+        ForRange a' aord e -> do
+          fc' <- ForRange a' <$> postprocess aord <*> postprocess e
+          ForStmt a fc' <$> newScope (mapM postprocess body)
+    LabeledStmt a l s -> LabeledStmt a l <$> postprocess s
+    AssignStmt a lhs op rhs -> AssignStmt a <$> mapM postprocess lhs <*> pure op <*> mapM postprocess rhs
+    DeclStmt a d -> DeclStmt a <$> postprocess d
+    ExpressionStmt a e -> ExpressionStmt a <$> postprocess e
+    SendStmt a c v -> SendStmt a <$> postprocess c <*> postprocess v
+    UnaryAssignStmt a e incdec -> UnaryAssignStmt a <$> postprocess e <*> pure incdec
+    GoStmt a e -> GoStmt a <$> postprocess e
+    ReturnStmt a es -> ReturnStmt a <$> mapM postprocess es
+    DeferStmt a e -> DeferStmt a <$> postprocess e
+    BreakStmt {} -> pure s
+    ContinueStmt {} -> pure s
+    FallthroughStmt {} -> pure s
+    EmptyStmt {} -> pure s
+    GotoStmt {} -> pure s
 
 nonBlankId i = case i of
   Id {} -> True
@@ -473,6 +504,13 @@ instance Postprocess (Expression SourceRange) where
           TypeAssertion a e ty -> TypeAssertion a <$> postprocess e <*> postprocess ty
           _ -> return e
     in  mpp >>= disambiguate
+
+instance Postprocess (AssignOrDecl SourceRange) where
+  postprocess aord =
+    case aord of
+      AODNone -> pure AODNone
+      Decl ids -> Decl <$> mapM postprocess ids
+      Assign es -> Assign <$> mapM postprocess es
 
 instance Postprocess a => Postprocess (Maybe a) where
   postprocess = sequence . fmap postprocess
