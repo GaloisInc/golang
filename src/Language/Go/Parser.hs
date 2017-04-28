@@ -435,12 +435,6 @@ instance Postprocess (FieldDecl SourceRange) where
       AnonymousFieldDecl a tname mtag ->
         AnonymousFieldDecl a <$> postprocess tname <*> pure mtag
 
--- FIXME: ShortVarDeclStmt in the initializer statement position of an If
--- doesn't get traversed because there is no clause in the fallthrough case to
--- descend through statements.  Adding one is problematic, because it visits
--- things multiple times.
---
--- In fact, it seems to visit things multiple times already
 instance Postprocess (Statement SourceRange) where
   postprocess s = case s of
     ShortVarDeclStmt a idents inits ->
