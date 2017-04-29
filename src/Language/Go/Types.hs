@@ -103,7 +103,7 @@ getExprType e = case e of
          --   -- specify size: inferring size from the maximum index (can
          --   -- be different from the lenght of the litral)
          --   Array (Just (IntLit _ len)) eltype -> undefined
-    _ -> unexpected e "Expression not supported"
+    _ -> unexpected e $ "Expression not supported " ++ show e
 
 getIndexedElementType :: (Ranged r, MonadError (SourceRange, String) m) => r -> ExprType -> ExprType -> m VarType
 getIndexedElementType rng btype itype =
