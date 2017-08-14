@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable, DeriveFunctor, DeriveTraversable, MultiParamTypeClasses, LambdaCase, FlexibleInstances, TemplateHaskell, StandaloneDeriving #-}
+{-# LANGUAGE DeriveDataTypeable, DeriveFunctor, DeriveTraversable, MultiParamTypeClasses, LambdaCase, FlexibleInstances, OverloadedStrings, TemplateHaskell, StandaloneDeriving #-}
 -- | The grammar of Go has the unfortunate property of having
 -- non-nested overlapping categories: that is categories that have
 -- both common and different elements. The examples of this are 1)
@@ -387,7 +387,7 @@ instance Default BindingKind where
   def = Unbound
 
 instance Default SourceRange where
-  def = SourceRange def def
+  def = SourceRange "<internal>" def def
 
 instance Default SourcePos where
   def = SourcePos (-1) (-1) (-1)
