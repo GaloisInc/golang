@@ -42,8 +42,8 @@ library
   build-depends:       base == 4.*
                      , mtl
                      , charset
-                     , text >= 1.2 && < 1.3
-                     , alex-tools >= 0.1.1.0 && < 0.2
+                     , text >= 1.2
+                     , alex-tools >= 0.1.1.0
                      , array
                      , semigroups
                      , lens-simple
