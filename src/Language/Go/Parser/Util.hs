@@ -1,4 +1,4 @@
-{-# LANGUAGE FlexibleInstances, StandaloneDeriving, DeriveDataTypeable, TemplateHaskell, FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances, StandaloneDeriving, DeriveDataTypeable, OverloadedStrings, TemplateHaskell, FlexibleContexts #-}
 -- | Utilities for the first stage (ambiguous) parser
 module Language.Go.Parser.Util where
 
@@ -19,7 +19,7 @@ unexpected :: (Ranged a, MonadError (SourceRange,String) m)
 unexpected a msg = throwError (fromMaybe fakeRange (getRange a), msg)
 
 fakePos = SourcePos (-1)(-1)(-1)
-fakeRange = SourceRange fakePos fakePos
+fakeRange = SourceRange "<internal>" fakePos fakePos
 
 pos :: Ranged a => a -> (SourceRange -> b) -> b
 pos a ctor = ctor $ fromMaybe fakeRange $ getRange a
@@ -53,7 +53,7 @@ instance (Ranged a, Ranged b) => Ranged (a,b) where
       (Just a, Nothing) -> Just a
       (Nothing, Just a) -> Just a
       (Just a, Just b)  ->
-        Just $! SourceRange { sourceFrom = sourceFrom a, sourceTo = sourceTo b }
+        Just $! SourceRange { sourceFile = sourceFile a, sourceFrom = sourceFrom a, sourceTo = sourceTo b }
 
 instance Ranged () where
   getRange () = Nothing
