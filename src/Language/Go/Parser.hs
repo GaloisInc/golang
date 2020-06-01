@@ -67,7 +67,7 @@ parse :: Text -- ^ Text of the program/module
       -> (Text -> Parser (Package SourceRange))
       -- ^ A resolver/loader function for imported modules 
       -> Parser (File SourceRange)
-parse txt loader = (liftHappy $ file $ lexer $ initialInput txt)
+parse txt loader = (liftHappy $ file $ lexer $ initialInput undefined txt) -- TODO!
                >>= (\f@(File rng _ pname _ _) -> return $ Package rng pname (f :| []))
                >>= transformBiM loadImport
                >>= postprocess

@@ -18,8 +18,8 @@ unexpected :: (Ranged a, MonadError (SourceRange,String) m)
            => a -> String -> m b
 unexpected a msg = throwError (fromMaybe fakeRange (getRange a), msg)
 
-fakePos = SourcePos (-1)(-1)(-1)
-fakeRange = SourceRange "<internal>" fakePos fakePos
+fakePos = SourcePos (-1)(-1)(-1) "<internal>"
+fakeRange = SourceRange fakePos fakePos
 
 pos :: Ranged a => a -> (SourceRange -> b) -> b
 pos a ctor = ctor $ fromMaybe fakeRange $ getRange a
@@ -53,7 +53,7 @@ instance (Ranged a, Ranged b) => Ranged (a,b) where
       (Just a, Nothing) -> Just a
       (Nothing, Just a) -> Just a
       (Just a, Just b)  ->
-        Just $! SourceRange { sourceFile = sourceFile a, sourceFrom = sourceFrom a, sourceTo = sourceTo b }
+        Just $! SourceRange { sourceFrom = sourceFrom a, sourceTo = sourceTo b }
 
 instance Ranged () where
   getRange () = Nothing

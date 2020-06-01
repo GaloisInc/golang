@@ -1,5 +1,5 @@
 {
-{-# LANGUAGE LambdaCase  #-}
+{-# LANGUAGE LambdaCase, FlexibleContexts  #-}
 module Language.Go.Parser.Ambiguous where
 
 import Language.Go.AST
@@ -174,7 +174,7 @@ revtoplevels :: {[TopLevel SourceRange]}
   : {[]}
   | revtoplevels toplevel ';' {reverse ($2: $1)}
                
-toplevel :: {TopLevel a}
+toplevel :: {TopLevel SourceRange}
   : declaration {pos $1 TopDecl $1}
   | 'func' identifier parameters optreturns optblock {
       pos ($1, ($4,$5)) FunctionDecl     $2 $3 $4 $5

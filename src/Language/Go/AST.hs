@@ -387,10 +387,10 @@ instance Default BindingKind where
   def = Unbound
 
 instance Default SourceRange where
-  def = SourceRange "<internal>" def def
+  def = SourceRange def def
 
 instance Default SourcePos where
-  def = SourcePos (-1) (-1) (-1)
+  def = SourcePos (-1) (-1) (-1) "<internal>"
 
 -- | Changes all the labels in the tree to another one, given by a
 -- function.

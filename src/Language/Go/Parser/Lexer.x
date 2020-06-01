@@ -371,7 +371,7 @@ alexGetByte = makeAlexGetByte classifyChar
 lexer = $makeLexer LexerConfig
   {lexerInitialState = LexerState Nothing NormalMode
   ,lexerStateMode = fromEnum . lexingMode
-  ,lexerEOF = const []
+  ,lexerEOF = (\_ _ -> [])
   }
 
 }
