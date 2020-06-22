@@ -160,6 +160,13 @@ tokens :-
   <0> ";" {mylexeme Semicolon}
   <0> ":" {mylexeme Colon}
 
+  -- nil literal
+  <0> "nil" {mylexeme NilLit}
+
+  -- bool literals
+  <0> "true" {mylexeme (BoolLit True)}
+  <0> "false" {mylexeme (BoolLit False)}
+
   -- integer literals
   <0> @decimal_lit {readText decimal >>= (mylexeme . IntLit)}
   <0> @hex_lit {readText hexadecimal >>= (mylexeme . IntLit)}

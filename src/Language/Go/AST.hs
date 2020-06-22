@@ -278,7 +278,9 @@ data ChannelDirection a = Send a | Recv a | Duplex a
 data Receiver a = Receiver a (Maybe (Id a)) Bool {- Pointed? -} (TypeName a)
   deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
 
-data Expression a = IntLit a Integer
+data Expression a = NilLit a
+                  | BoolLit a Bool
+                  | IntLit a Integer
                   | FloatLit a Double
                   | ImaginaryLit a Double
                   | RuneLit a Char

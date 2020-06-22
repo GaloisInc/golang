@@ -54,20 +54,22 @@ noType = Nil
 runParser :: Parser a -> IO (Either (SourceRange, String) a)
 runParser = (`evalStateT` def) . runExceptT
 
-parseText :: Text -- ^ Text of a file/module
+parseText :: Text -- ^ File name
+          -> Text -- ^ Text of the file/module
           -> (Text -> Parser (Package SourceRange))
           -- ^ A resolver/loader function for imported
           -- modules. Implementations are encouraged to use
           -- `parsePackage`. For an example implementation see
           -- `defaultPackageLoader` and `parsePackage`.
           -> IO (Either (SourceRange, String) (File SourceRange))
-parseText txt loader = runParser $ parse txt loader
+parseText fnm txt loader = runParser $ parse fnm txt loader
 
-parse :: Text -- ^ Text of the program/module
+parse :: Text -- ^ File name
+      -> Text -- ^ Text of the program/module
       -> (Text -> Parser (Package SourceRange))
-      -- ^ A resolver/loader function for imported modules 
+      -- ^ A resolver/loader function for imported modules
       -> Parser (File SourceRange)
-parse txt loader = (liftHappy $ file $ lexer $ initialInput undefined txt) -- TODO!
+parse fnm txt loader = (liftHappy $ file $ lexer $ initialInput fnm txt)
                >>= (\f@(File rng _ pname _ _) -> return $ Package rng pname (f :| []))
                >>= transformBiM loadImport
                >>= postprocess
@@ -539,6 +541,8 @@ instance Postprocess (Type SourceRange) where
       SliceType a st -> SliceType a <$> postprocess st
       MapType a t1 t2 -> MapType a <$> postprocess t1 <*> postprocess t2
       ChannelType a cd et -> ChannelType a cd <$> postprocess et
+      FunctionType a params rets ->
+        FunctionType a <$> postprocess params <*> postprocess rets
 
 instance Postprocess (Id SourceRange) where
   postprocess i = case i of
@@ -663,8 +667,10 @@ defaultPackageLoader path = ExceptT $ lift $ loader
                  
 -- | Parse a file using the default imported module loader.
 parseFile :: FilePath -> IO (Either String (File SourceRange))
-parseFile fp = do moduleText <- liftIO $ readFile fp
-                  liftM (bimap (\err -> "Parse error at " ++ show (fst err) ++ ": " ++ snd err) id) $ parseText moduleText (defaultPackageLoader . unpack)
+parseFile fp = do
+  moduleText <- liftIO $ readFile fp
+  liftM (bimap (\err -> "Parse error at " ++ show (fst err) ++ ": " ++ snd err) id) $
+    parseText (T.pack $ takeFileName fp) moduleText (defaultPackageLoader . unpack)
 
 -- | Parse a module using the default module loader. The first
 -- argument is the directory path that contains the module source

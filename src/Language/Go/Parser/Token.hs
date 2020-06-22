@@ -81,6 +81,8 @@ data Token = Ident Text -- ^Identifier
            | Semicolon -- ^;
            | Colon     -- ^:
 
+           | NilLit
+           | BoolLit Bool -- ^integer (decimal, octal or hex) literal
            | IntLit Integer -- ^integer (decimal, octal or hex) literal
            | FloatLit Double -- ^floating-point literal
            | ImaginaryLit Double -- ^imaginary literal

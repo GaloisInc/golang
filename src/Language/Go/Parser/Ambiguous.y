@@ -99,6 +99,8 @@ import Data.Default.Class
        ';' {Lexeme {lexemeToken = T.Semicolon}}
        ':' {Lexeme {lexemeToken = T.Colon}}
 
+       nil {Lexeme {lexemeToken = T.NilLit}}
+       bool {Lexeme {lexemeToken = T.BoolLit _}}
        int {Lexeme {lexemeToken = T.IntLit _}}
        float {Lexeme {lexemeToken = T.FloatLit _}}
        imaginary {Lexeme {lexemeToken = T.ImaginaryLit _}}
@@ -415,7 +417,9 @@ arguments :: {(Maybe (Type SourceRange), [Expression SourceRange], Maybe (Expres
     }
 
 operand :: {Expression SourceRange}
-  : int {pos $1 IntLit (getInt $1)}
+  : nil { pos $1 NilLit }
+  | bool { pos $1 BoolLit (getBool $1) }
+  | int {pos $1 IntLit (getInt $1)}
   | float {pos $1 FloatLit (getFloat $1)}
   | imaginary {pos $1 ImaginaryLit (getImaginary $1)}
   | rune {pos $1 RuneLit (getRune $1)}
@@ -793,6 +797,7 @@ ifOrBlock :: {[Statement SourceRange]}
 
 getIdent :: Lexeme Token -> Text
 getIdent lex = let T.Ident t = lexemeToken lex in t
+getBool lex = let T.BoolLit b = lexemeToken lex in b
 getInt lex = let T.IntLit i = lexemeToken lex in i
 getFloat lex = let T.FloatLit d = lexemeToken lex in d
 getImaginary lex = let T.ImaginaryLit d = lexemeToken lex in d

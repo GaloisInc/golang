@@ -1,4 +1,6 @@
-{-# LANGUAGE DeriveDataTypeable, FlexibleContexts, FlexibleInstances, StandaloneDeriving, LambdaCase, TupleSections #-}
+{-# LANGUAGE DeriveDataTypeable, FlexibleContexts, FlexibleInstances #-}
+{-# LANGUAGE StandaloneDeriving, LambdaCase, TupleSections #-}
+
 -- | 'Resolved' type representations and inference/checking
 module Language.Go.Types where
 
@@ -16,21 +18,31 @@ import Control.Arrow
 
 class Typed a where
   getType :: MonadError (SourceRange, String) m => a -> m VarType
-
+               
 -- The following is a gross simplification that will only give correct
 -- results for (a subset of?) correct Go code. Actual Go type checking
 -- rules are more intricate and are not implemented fully right now.
 getExprType :: MonadError (SourceRange, String) m => Expression SourceRange -> m ExprType
 getExprType e = case e of
-    IntLit _ i -> return $ ConstType $ CInt i
-    FloatLit _ d -> return $ ConstType $ CFloat d
-    ImaginaryLit _ im -> return $ ConstType $ CComplex 0 im
-    RuneLit _ c -> return $ ConstType $ CRune c
-    StringLit _ s -> return $ ConstType $ CString s
-    Name _ mqual (Id rng bind _) -> case bind^.bindingKind of
-                                      VarB st -> return $ VarType st
-                                      ConstB st -> return $ VarType st
-                                      _       -> unexpected rng "An identifier is used as a variable, but not bound to a value"
+  CallExpr _ f _t params spread -> do
+    f_ty <- getExprType f
+    case f_ty of
+      VarType (Function _ _ _ [rty]) -> return $ VarType rty
+      VarType (Function _ _ _ rtys) ->
+        error $ "Types.getExprType: expected exactly one return type, found " ++ show rtys
+      ConstType cty ->
+        error $ "Types.getExprType: expected VarType, found ConstType " ++ show cty
+    
+  IntLit _ i -> return $ ConstType $ CInt i
+  FloatLit _ d -> return $ ConstType $ CFloat d
+  ImaginaryLit _ im -> return $ ConstType $ CComplex 0 im
+  RuneLit _ c -> return $ ConstType $ CRune c
+  StringLit _ s -> return $ ConstType $ CString s
+  Name _ mqual (Id rng bind _) ->
+    case bind^.bindingKind of
+      VarB st -> return $ VarType st
+      ConstB st -> return $ VarType st
+      _ -> unexpected rng "An identifier is used as a variable, but not bound to a value"
     -- For binary operators, other than comparisons, the operand types
     -- must be identical unless the operation involves shifts or
     -- untyped constants. Arithmetic operators apply to numeric values
@@ -38,42 +50,42 @@ getExprType e = case e of
     -- operand. Except for shift operations, if one operand is an
     -- untyped constant and the other operand is not, the constant is
     -- converted to the type of the other operand.
-    BinaryExpr _ op left right ->
-      do lt <- getExprType left
-         rt <- getExprType right
-         case op of
-           Add -> do assertTypeIdentity (left, right) lt rt
-                     return lt
-           Subtract -> do assertTypeIdentity (left, right) lt rt
-                          return lt
-           Multiply -> do assertTypeIdentity (left, right) lt rt
-                          return lt
-           Divide -> do assertTypeIdentity (left, right) lt rt
+  BinaryExpr _ op left right ->
+    do lt <- getExprType left
+       rt <- getExprType right
+       case op of
+         Add -> do assertTypeIdentity (left, right) lt rt
+                   return lt
+         Subtract -> do assertTypeIdentity (left, right) lt rt
                         return lt
+         Multiply -> do assertTypeIdentity (left, right) lt rt
+                        return lt
+         Divide -> do assertTypeIdentity (left, right) lt rt
+                      return lt
            -- FIXME: rhs of shifts is actually required to be uint or
            -- a constant representable by uint
-           LeftShift  -> if isInteger lt && isInteger rt then return lt
-                         else unexpected e $ "Shift expressions require integer operands"
-           RightShift -> if isInteger lt && isInteger rt then return lt
-                         else unexpected e $ "Shift expressions require integer operands"
-           BitwiseXOr -> if isInteger lt && isInteger rt then return lt
-                         else unexpected e $ "Shift expressions require integer operands"
-           BitwiseOr  -> if isInteger lt && isInteger rt then return lt
-                         else unexpected e $ "Shift expressions require integer operands"
-           BitwiseAnd  -> if isInteger lt && isInteger rt then return lt
-                         else unexpected e $ "Shift expressions require integer operands"
-           _ -> unexpected e $ "Type analysis has not yet been implemented for the binary operator " ++ show op
-    UnaryExpr  _ op operand -> do ot <- getExprType operand
-                                  -- assertTypeP (isInteger .||. isFloat) ot
-                                  return ot
+         LeftShift  -> if isInteger lt && isInteger rt then return lt
+                       else unexpected e $ "Shift expressions require integer operands"
+         RightShift -> if isInteger lt && isInteger rt then return lt
+                       else unexpected e $ "Shift expressions require integer operands"
+         BitwiseXOr -> if isInteger lt && isInteger rt then return lt
+                       else unexpected e $ "Shift expressions require integer operands"
+         BitwiseOr  -> if isInteger lt && isInteger rt then return lt
+                       else unexpected e $ "Shift expressions require integer operands"
+         BitwiseAnd  -> if isInteger lt && isInteger rt then return lt
+                        else unexpected e $ "Shift expressions require integer operands"
+         _ -> unexpected e $ "Type analysis has not yet been implemented for the binary operator " ++ show op
+  UnaryExpr  _ op operand -> do ot <- getExprType operand
+                                -- assertTypeP (isInteger .||. isFloat) ot
+                                return ot
                                      
-    IndexExpr _ base index ->
-      do btype <- getExprType base
-         itype <- getExprType index
-         liftM VarType $ getIndexedElementType e btype itype
+  IndexExpr _ base index ->
+    do btype <- getExprType base
+       itype <- getExprType index
+       liftM VarType $ getIndexedElementType e btype itype
                                   
-    CompositeLit _ litType elements ->
-      getType litType >>= underlyingType litType >>= (return . VarType)
+  CompositeLit _ litType elements ->
+    getType litType >>= underlyingType litType >>= (return . VarType)
          -- The LiteralType's underlying type must be a struct, array,
          -- slice, or map type (the grammar enforces this constraint
          -- except when the type is given as a TypeName)
@@ -103,7 +115,7 @@ getExprType e = case e of
          --   -- specify size: inferring size from the maximum index (can
          --   -- be different from the lenght of the litral)
          --   Array (Just (IntLit _ len)) eltype -> undefined
-    _ -> unexpected e $ "Expression not supported " ++ show e
+  _ -> unexpected e $ "in Types.getExprType: Expression not supported " ++ show e
 
 getIndexedElementType :: (Ranged r, MonadError (SourceRange, String) m) => r -> ExprType -> ExprType -> m VarType
 getIndexedElementType rng btype itype =
@@ -159,12 +171,24 @@ instance Typed (Type SourceRange) where
                    TypeB st -> return st
                    _ -> unexpected rng "An identifier is used as a type name, but not bound to a type"
     -- | Types without a constant integer length speficied aren't
-    -- supported right. Also, types without a specified length are
+    -- supported right now. Also, types without a specified length are
     -- only valid in composite literals and should be handled there.
     ArrayType _ mlen elt ->
       do elty <- getType elt
          return $ Array (fmap (reannotate (const ())) mlen) elty
+    FunctionType _ params rets ->
+      pure (uncurry $ Function Nothing) <*> paramTys params <*> retTys rets
     _ -> unexpected t $ "Unsupported type " ++ show t
+    where
+      paramTys :: MonadError (SourceRange, String) m =>
+                  ParameterList SourceRange -> m ([VarType], Maybe VarType)
+      paramTys (NamedParameterList _ params spread) =
+        pure (,) <*> (mapM getType params) <*> (mapM getType spread)
+      paramTys (AnonymousParameterList _ params spread) =
+        pure (,) <*> (mapM getType params) <*> (mapM getType spread)
+      retTys :: MonadError (SourceRange, String) m => ReturnList SourceRange -> m [VarType]
+      retTys (NamedReturnList _ returns) = mapM getType returns
+      retTys (AnonymousReturnList _ returns) = mapM getType returns
 
 instance Typed (NamedParameter SourceRange) where
   getType (NamedParameter _ _ ty) = getType ty
@@ -359,3 +383,7 @@ underlyingType r (Alias (TypeName _ _ (Id _ bk ident))) =
     TypeB vt -> underlyingType r vt
     _        -> unexpected r $ "Type alias " ++ show ident ++ " is not bound to a type"
 underlyingType _ t = return t
+
+varType :: MonadError a m => ExprType -> m VarType
+varType (VarType t) = return t
+varType (ConstType t) = error $ "expected VarType, got " ++ show t
