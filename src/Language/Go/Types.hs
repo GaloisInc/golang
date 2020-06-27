@@ -15,6 +15,10 @@ import Control.Applicative
 import Data.Map (Map)
 import Data.Text (Text)
 import Control.Arrow
+-- import Data.Ord (Ordering)
+import qualified Data.PartialOrd as PO
+
+import Debug.Trace (trace)
 
 class Typed a where
   getType :: MonadError (SourceRange, String) m => a -> m VarType
@@ -50,31 +54,48 @@ getExprType e = case e of
     -- operand. Except for shift operations, if one operand is an
     -- untyped constant and the other operand is not, the constant is
     -- converted to the type of the other operand.
+    
   BinaryExpr _ op left right ->
     do lt <- getExprType left
        rt <- getExprType right
-       case op of
-         Add -> do assertTypeIdentity (left, right) lt rt
-                   return lt
-         Subtract -> do assertTypeIdentity (left, right) lt rt
-                        return lt
-         Multiply -> do assertTypeIdentity (left, right) lt rt
-                        return lt
-         Divide -> do assertTypeIdentity (left, right) lt rt
-                      return lt
-           -- FIXME: rhs of shifts is actually required to be uint or
-           -- a constant representable by uint
-         LeftShift  -> if isInteger lt && isInteger rt then return lt
-                       else unexpected e $ "Shift expressions require integer operands"
-         RightShift -> if isInteger lt && isInteger rt then return lt
-                       else unexpected e $ "Shift expressions require integer operands"
-         BitwiseXOr -> if isInteger lt && isInteger rt then return lt
-                       else unexpected e $ "Shift expressions require integer operands"
-         BitwiseOr  -> if isInteger lt && isInteger rt then return lt
-                       else unexpected e $ "Shift expressions require integer operands"
-         BitwiseAnd  -> if isInteger lt && isInteger rt then return lt
-                        else unexpected e $ "Shift expressions require integer operands"
-         _ -> unexpected e $ "Type analysis has not yet been implemented for the binary operator " ++ show op
+       -- trace ("\nlt: " ++ show lt) $
+       --   trace ("rt: " ++ show rt ++ "\n") $
+       --   trace "*************HELLO************" $
+       if isArithBinop op then
+             case (lt, rt) of
+               (ConstType lct, ConstType rct) ->
+                 case PO.maxima [lct, rct] of
+                   [] -> unexpected e "incompatible constant expressions"
+                   t : _ -> return $ ConstType t
+               (ConstType ct, VarType vt) ->
+                 if representableBy ct vt then return rt else
+                   unexpected e $ "constant of kind " ++ show ct ++
+                   " not representable by type " ++ show vt
+               (VarType vt, ConstType ct) ->
+                 if representableBy ct vt then return lt else
+                   unexpected e $ "constant of kind " ++ show ct ++
+                   " not representable by type " ++ show vt
+               (VarType _lvt, VarType _rvt) ->
+                 assertTypeIdentity (left, right) lt rt >> return lt
+         else
+           -- TODO: fix the rest to allow for constants to be promoted
+           -- like the above.
+           case op of   
+                -- FIXME: rhs of shifts is actually required to be uint or
+                -- a constant representable by uint
+             LeftShift  -> if isInteger lt && isInteger rt then return lt
+                           else unexpected e "Shift expressions require integer operands"
+             RightShift -> if isInteger lt && isInteger rt then return lt
+                           else unexpected e "Shift expressions require integer operands"
+             BitwiseXOr -> if isInteger lt && isInteger rt then return lt
+                           else unexpected e "Shift expressions require integer operands"
+             BitwiseOr  -> if isInteger lt && isInteger rt then return lt
+                           else unexpected e "Shift expressions require integer operands"
+             BitwiseAnd  -> if isInteger lt && isInteger rt then return lt
+                            else unexpected e "Shift expressions require integer operands"
+             _ -> unexpected e $ "Type analysis has not yet been implemented for the binary operator "
+                  ++ show op
+
   UnaryExpr  _ op operand -> do ot <- getExprType operand
                                 -- assertTypeP (isInteger .||. isFloat) ot
                                 return ot
@@ -160,7 +181,8 @@ instance Typed (Expression SourceRange) where
 
 assertTypeIdentity :: (MonadError (SourceRange, String) m, Ranged r)
                    => r -> ExprType -> ExprType -> m ()
-assertTypeIdentity rng st1 st2 = unless (st1 == st2) $ unexpected rng "Expecting operands to have identical types"
+assertTypeIdentity rng st1 st2 =
+  unless (st1 == st2) $ unexpected rng "Expecting operands to have identical types"
 
 deriving instance Eq ExprType
 
@@ -261,7 +283,7 @@ representableBy (CFloat f) vt =
   if isFloat (VarType vt) then True
   else if isInteger (VarType vt) then
           let (whole, fraction) = properFraction f
-          in  fraction == 0 && representableBy (CInt whole) vt
+          in fraction == 0 && representableBy (CInt whole) vt
        else False
 
 isInteger :: ExprType -> Bool
@@ -345,12 +367,18 @@ ctypeOrdering ct = case ct of
   CComplex _ _ -> Just 4
   _            -> Nothing
   
--- | Subtyping/ordering for constant types
-instance Ord ConstType where 
-  ct1 <= ct2 = if ct1 == ct2 then True
-               else case (ctypeOrdering ct1, ctypeOrdering ct2) of
-                      (Just o1, Just o2) -> o1 <= o2
-                      _                  -> False
+-- -- | Subtyping/ordering for constant types
+-- instance Ord ConstType where 
+--   ct1 <= ct2 = if ct1 == ct2 then True
+--                else case (ctypeOrdering ct1, ctypeOrdering ct2) of
+--                       (Just o1, Just o2) -> o1 <= o2
+--                       _                  -> False
+
+instance PO.PartialOrd ConstType where
+  compare ct1 ct2 = if ct1 == ct2 then Just EQ
+                    else case (ctypeOrdering ct1, ctypeOrdering ct2) of
+                           (Just o1, Just o2) -> Just $ compare o1 o2
+                           _                  -> Nothing
 
 deriving instance Eq BindingKind
 deriving instance Eq Binding
@@ -387,3 +415,10 @@ underlyingType _ t = return t
 varType :: MonadError a m => ExprType -> m VarType
 varType (VarType t) = return t
 varType (ConstType t) = error $ "expected VarType, got " ++ show t
+
+isArithBinop :: BinaryOp -> Bool
+isArithBinop Add = True
+isArithBinop Subtract = True
+isArithBinop Multiply = True
+isArithBinop Divide = True
+isArithBinop _ = False

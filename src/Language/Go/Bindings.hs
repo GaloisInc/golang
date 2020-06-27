@@ -90,6 +90,9 @@ predeclaredBindings = HM.fromList $ map (second $ \k -> Binding fakeRange k True
   ,("nil", ConstB Nil)
   ,("true", ConstB  Boolean)
   ,("false", ConstB Boolean)
+  ,("fresh_int", VarB $ Function Nothing [] Nothing [Int Nothing False]) -- TEMPORARY HACK
+  ,("assume", VarB $ Function Nothing [Boolean] Nothing []) -- TEMPORARY HACK
+  ,("assert", VarB $ Function Nothing [Boolean] Nothing []) -- TEMPORARY HACK
   ]
   ++ map (id &&& (ConstB . BuiltIn))
   ["append", "cap", "close", "complex", "copy", "delete", "imag", "len", "make",

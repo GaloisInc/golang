@@ -139,9 +139,15 @@ disambiguate e = case e of
                  isNothing mtype && -- the first argument is not a type
                  length args == 1 && -- there is exactly one argument
                  isNothing mspread -- there is no spread argument
-              then return $ pos (rng, head args) Conversion 
-                   (NamedType rng $ TypeName rng mqual ident)
-                   (head args)
+              then
+                -- trace ("\n\nrng: " ++ show rng) $
+                -- trace ("mqual: " ++ show mqual) $
+                -- trace ("ident: " ++ show ident) $
+                -- trace ("mtype: " ++ show mtype) $
+                -- trace ("args: " ++ show args ++ "\n\n") $
+                return $ pos (rng, head args) Conversion 
+                (NamedType rng $ TypeName rng mqual ident)
+                (head args)
               else return call'
             _ -> return call'
   _ -> return e

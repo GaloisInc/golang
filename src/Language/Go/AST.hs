@@ -325,6 +325,10 @@ deriving instance Typeable SourceRange
 deriving instance Data SourcePos
 deriving instance Typeable SourcePos
 
+
+-- | NOTE: the following definitions are not part of the abstract
+-- syntax, but are used for typechecking purposes.
+
 -- | The type of data that can be stored in Go (variables and fields)
 data VarType = Int (Maybe Int) {- ^ Bitwidth. Architecture-dependent if `Nothing` -} Bool {- ^ Signed? -}
              | Boolean
