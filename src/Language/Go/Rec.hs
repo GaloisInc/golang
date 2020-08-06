@@ -1,10 +1,10 @@
 {-|
 Module      : Lang.Crucible.Go.Rec
-Description : TODO: short description
+Description : Golang recursion schemes
 Maintainer  : abagnall@galois.com
 Stability   : experimental
 
-TODO: long description
+Recursion scheme combinators for Go abstract syntax.
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PolyKinds #-}

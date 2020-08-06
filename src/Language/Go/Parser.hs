@@ -18,11 +18,13 @@ import           Data.ByteString.Lazy (ByteString)
 import qualified Data.HashMap.Strict as HM
 import           Data.Text
 
--- import           Debug.Trace (trace)
-
 import           Language.Go.AST
 import           Language.Go.Rec
 import           Language.Go.Types as T
+
+-- | Entry point.
+parseMain :: ByteString -> Either String (Node SourcePos Main)
+parseMain txt = eitherDecode txt
 
 data SourcePos =
   SourcePos { pos_filename :: Text
@@ -359,6 +361,3 @@ instance FromJSON T.Type where
       "Struct" -> T.StructType <$> v .: "fields"
       "Tuple" -> T.TupleType <$> v .: "fields"
       _ -> fail $ "FromJSON Type: unknown type " ++ show v
-
-parseMain :: ByteString -> Either String (Node SourcePos Main)
-parseMain txt = eitherDecode txt

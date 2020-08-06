@@ -1,10 +1,16 @@
 {-|
 Module      : Lang.Crucible.Go.Desugar
-Description : TODO: short description
+Description : Go syntax desugarer
 Maintainer  : abagnall@galois.com
 Stability   : experimental
 
-TODO: long description
+"Desugaring" phase of the go frontend. Applies the following syntactic
+transformations:
+* replace nil idents with NilExprs and type idents with NamedTypeExprs.
+* introduce/eliminate tuples where "multi-values" appear.
+* convert variadic arguments to slice literals.
+* insert missing return statements and fill in "naked returns".
+* replace increment and decrement statements with assign statements.
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
@@ -15,18 +21,11 @@ module Language.Go.Desugar (desugar) where
 import           Control.Monad.Except
 import           Control.Monad.Identity
 
--- import           Data.Maybe (fromMaybe)
-
-import           Debug.Trace (trace)
-
 import           Language.Go.AST
 import           Language.Go.Rec
 import           Language.Go.Types
 
 -- | Entry point of the module.
--- desugar :: Node a tp -> Either String (Node a tp)
--- desugar = runDesugarM . cataM desugar_alg
-
 desugar :: Show a => Node a tp -> Node a tp
 desugar node = case runDesugarM $ cataM desugar_alg node of
   Left msg -> error msg
@@ -38,12 +37,6 @@ runDesugarM :: DesugarM a -> Either String a
 runDesugarM = runIdentity . runExceptT
 
 -- | Desugar Go programs so they are more directly translatable to Crucible.
--- Currently, the following transformations are performed:
--- * replace nil idents with NilExprs and type idents with NamedTypeExprs
--- * introduce/eliminate tuples
--- * convert variadic arguments to slice literals
--- * insert missing return statements and fill in "naked returns"
--- * replace increment and decrement statements with assign statements
 desugar_alg :: Show a => NodeF a (Node a) tp -> DesugarM (Node a tp)
 
 -- | Convert nil and type identifiers to their own different syntactic
@@ -68,7 +61,6 @@ desugar_alg (AssignStmt x assign_tp op lhs rhs) =
 desugar_alg (ConstSpec x names ty values) =
   return $ In $ ConstSpec x names ty $ unpack_tuple values
 desugar_alg (VarSpec x names ty values) =
-  -- trace (show $ In $ VarSpec x names ty $ unpack_tuple values) $
   return $ In $ VarSpec x names ty $ unpack_tuple values
 desugar_alg (InitializerStmt vars values) =
   return $ In $ InitializerStmt vars $ unpack_tuple values

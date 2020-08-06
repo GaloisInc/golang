@@ -1,10 +1,12 @@
 {-|
 Module      : Lang.Crucible.Go.Types
-Description : TODO: short description
+Description : Golang type semantics
 Maintainer  : abagnall@galois.com
 Stability   : experimental
 
-TODO: long description
+The definitions here mirror those from the "go/types" package. They
+represent semantic type information, not syntactic type expressions as
+may appear in the syntax of a program.
 -}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PolyKinds #-}

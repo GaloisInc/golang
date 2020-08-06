@@ -1,10 +1,11 @@
 {-|
 Module      : Lang.Crucible.Go.Rename
-Description : TODO: short description
+Description : Golang renamer
 Maintainer  : abagnall@galois.com
 Stability   : experimental
 
-TODO: long description
+The renamer fills in missing qualifiers for global identifiers so that
+every global becomes fully qualified.
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
