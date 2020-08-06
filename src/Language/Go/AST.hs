@@ -1,440 +1,723 @@
-{-# LANGUAGE DeriveDataTypeable, DeriveFunctor, DeriveTraversable, MultiParamTypeClasses, LambdaCase, FlexibleInstances, OverloadedStrings, TemplateHaskell, StandaloneDeriving #-}
--- | The grammar of Go has the unfortunate property of having
--- non-nested overlapping categories: that is categories that have
--- both common and different elements. The examples of this are 1)
--- Types, TypeLiterals and LiteralTypes and 2) TopLevelDeclarations
--- and Statements.
---
--- Encoding this with algebraic data-types is challenging and requires
--- either deeply nested trees with some duplication of constructors
--- for the categories at the intersections, or usage of GADTs and type
--- families or kinds to restrict the shape of flatter trees. Both
--- approaches are involved and cumbersome, so instead we design ASTs
--- to represent a superset of actual Go syntax and a run-time
--- predicate `isValid` to restrict the valid AST instances.
---
--- In future we might look into pushing the restriction more into the
--- type system, but for now things are guaranteed to behave iff
--- `isValid` holds true for a given AST. Of course, the parser is
--- guaranteed to produce only valid trees.
-module Language.Go.AST (SourceRange (..)
-                       ,SourcePos (..)
-                       ,Package (..)
-                       ,File (..)
-                       ,fileName
-                       ,ImportDecl (..)
-                       ,ImportSpec (..)
-                       ,ImportType (..)
-                       ,Path
-                       ,Declaration (..)
-                       ,TopLevel (..)
-                       ,Statement (..)
-                       ,IncDec (..)
-                       ,AssignOp (..)
-                       ,ExprClause (..)
-                       ,TypeSwitchGuard (..)
-                       ,TypeClause (..)
-                       ,ForClause (..)
-                       ,AssignOrDecl (..)
-                       ,CommClause (..)
-                       ,CommOp (..)
-                       ,ConstSpec (..)
-                       ,VarSpec (..)
-                       ,TypeSpec (..)
-                       ,Type (..)
-                       ,TypeName (..)
-                       ,ParameterList (..)
-                       ,ReturnList (..)
-                       ,NamedParameter (..)
-                       ,AnonymousParameter (..)
-                       ,Label (..)
-                       ,FieldDecl (..)
-                       ,Tag (..)
-                       ,MethodSpec (..)
-                       ,ChannelDirection (..)
-                       ,Receiver (..)
-                       ,Expression (..)
-                       ,Element (..)
-                       ,Key (..)
-                       ,BinaryOp (..)
-                       ,UnaryOp (..)
-                       ,Id (..)
-                       ,Binding(..)
-                       ,bindingImported
-                       ,bindingKind
-                       ,bindingDeclLoc
-                       ,bindingThisScope
-                       ,BindingKind(..)
-                       ,VarType (..)
-                       ,ConstType (..)
-                       ,ExprType (..)
-                       ,ann
-                       ,Annotated
-                       ,reannotate) where
+{-|
+Module      : Lang.Crucible.Go.AST
+Description : Go language abstract syntax
+Maintainer  : abagnall@galois.com
+Stability   : experimental
 
-import Data.Data (Data)
-import Data.Data (Typeable)
-import Data.Text (Text)
-import Data.Traversable (Traversable)
-import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
-import Control.Monad
-import Data.Maybe
-import Lens.Simple
-import Data.Either (Either)
-import Language.Annotated
-import Data.Semigroup
-import AlexTools (SourceRange(..), SourcePos (..))
-import Data.Map (Map)
-import Data.HashMap.Lazy (HashMap)
-import Data.Default.Class
+Go syntax in open recursion style, similar to the 'App' type of
+crucible expressions.
 
-data Package a = Package a Text {- package name -} (NonEmpty (File a))
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+The constructors are designed to closely match the standard 'go/ast'
+type definitions, with some adjustments to account for liberties taken
+by goblin as well as additional "internal language" forms such as
+tuples.
 
-data File a = File a Text {- File name -} Text {- package name -} [ImportDecl a] [TopLevel a]
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+We also include semantic type information in expression nodes, and
+have a BasicConstExpr form for representing the results of evaluated
+constant expressions (most literals end up as BasicConstExprs).
+-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE StandaloneDeriving #-}
+module Language.Go.AST where
 
-fileName :: File a -> Text
-fileName (File _ fname _ _ _ ) = fname
+import           Data.Text hiding (inits)
 
-data ImportDecl a = ImportDecl a [ImportSpec a]
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+import           Data.Parameterized.TraversableFC
 
-data ImportSpec a = Import a ImportType Path
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+import           Language.Go.Rec
+import           Language.Go.Types
 
-data ImportType = ImportAll
-                | ImportQualified (Maybe Text)
-  deriving (Show, Data, Typeable)                  
+-- TODO: make fields strict?
 
-type Path = Text
+-- | The type of AST nodes with annotations of type 'a' is the least
+-- fixed point of 'NodeF a'.
+type Node a = Fix (NodeF a)
 
-data Declaration a = TypeDecl a [TypeSpec a]
-                   | ConstDecl a [ConstSpec a]
-                   | VarDecl a [VarSpec a]
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+-- | Go AST node functor indexed by NodeType.
+data NodeF (a :: *) (f :: NodeType -> *) (i :: NodeType) where
 
-data TopLevel a = FunctionDecl a (Id a) (ParameterList a) (ReturnList a) (Maybe [Statement a])
-                | MethodDecl a (Receiver a) (Id a) (ParameterList a) (ReturnList a) (Maybe [Statement a])
-                | TopDecl a (Declaration a)
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | The main package.
+  MainNode :: Text -- ^ main package name
+           -> f Package -- ^ the main package itself
+           -> [f Package] -- ^ flat list containing the transitive
+                          -- closure of dependencies, ordered such
+                          -- that if package A depends on B, then B
+                          -- appears before A in the list (guaranteed
+                          -- by goblin).
+           -> NodeF a f Main
 
-data Statement a = DeclStmt a (Declaration a)
-                 | ExpressionStmt a (Expression a)
-                 | LabeledStmt a (Label a) (Statement a)
-                 | EmptyStmt a
-                 | SendStmt a (Expression a) {- ^Channel-} (Expression a) {- ^Value-}
-                 | BlockStmt a [Statement a]
-                 | UnaryAssignStmt a (Expression a) IncDec
-                 | AssignStmt a (NonEmpty (Expression a)) AssignOp (NonEmpty (Expression a))
-                 | IfStmt a (Maybe (Statement a)) {- ^ guard prefix, a simple statement -}
-                   (Expression a) {- ^guard -}
-                   [Statement a] {- ^then -} [Statement a] {- ^else -}
-                 | ExprSwitchStmt a (Maybe (Statement a)) {- ^guard prefix, a simple statement -}
-                   (Maybe (Expression a)) {- ^guard -} [ExprClause a]
-                 | TypeSwitchStmt a (Maybe (Statement a))  {- ^guard prefix, a simple statement -}
-                   (TypeSwitchGuard a) [TypeClause a]
-                 | ForStmt a (ForClause a) [Statement a]
-                 | GoStmt a (Expression a) -- ^ Go statement: fork a function
-                 | SelectStmt a [CommClause a] -- ^ select statement
-                 | BreakStmt a (Maybe (Label a))
-                 | ContinueStmt a (Maybe (Label a))
-                 | ReturnStmt a [Expression a]
-                 | GotoStmt a (Label a)
-                 | FallthroughStmt a
-                 | DeferStmt a (Expression a) -- ^ Deferred function call
-                 | ShortVarDeclStmt a (NonEmpty (Id a)) (NonEmpty (Expression a))
-                 deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | A package contains one or more files.
+  PackageNode :: Text -- ^ package name
+              -> Text -- ^ package path
+              -> [Text] -- ^ paths of imports
+              -> [Text] -- ^ source file absolute paths
+              -> [f File] -- ^ source files
+              -> [f Stmt] -- ^ initializers in execution order
+              -> NodeF a f Package
 
--- | Increment or decrement operation
-data IncDec = Inc | Dec
-  deriving (Show, Data, Typeable)
+  -- | A Go source file.
+  FileNode :: Text -- ^ file path
+           -> Ident -- ^ package name
+           -> [f Decl] -- ^ top-level declarations
+           -> [f Decl] -- ^ imports in this file
+           -> NodeF a f File
 
--- | Assignment operation
-data AssignOp = Assignment | ComplexAssign BinaryOp
-  deriving (Show, Data, Typeable)
+  ----------------------------------------------------------------------
+  -- Statements
 
--- | Expression switch statement clause
-data ExprClause a = ExprClause a [Expression a] {- Case values; if empty then it's a default case -} [Statement a]
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | An assignment or a short variable declaration.
+  AssignStmt :: a
+             -> AssignType
+             -> Maybe BinaryOp
+             -> [f Expr] -- ^ lhs
+             -> [f Expr] -- ^ rhs
+             -> NodeF a f Stmt
 
--- | Guard of a type switch statement
-data TypeSwitchGuard a = TypeSwitchGuard a (Maybe (Id a)) (Expression a)
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  BlockStmt :: a
+            -> f Block
+            -> NodeF a f Stmt
 
--- | Type switch case clause
-data TypeClause a = TypeClause a [Type a] {- type case values; if empty then it's a default case -} [Statement a]
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | A break, continue, goto, or fallthrough statement.
+  BranchStmt :: a
+             -> BranchType
+             -> Maybe Ident -- ^ label
+             -> NodeF a f Stmt
 
--- | For statement clauses. Note we overload this name from the spec
--- to also include conditional and range clauses.
-data ForClause a = ForClause a (Maybe (Statement a)) (Maybe (Expression a)) (Maybe (Statement a))
-                 -- ^C-style for-clause with an initializer, iteration
-                 -- condition and post-iteration action. This also
-                 -- includes the "Condition" form of the clause in the
-                 -- spec, which is equivalent to a clause without the
-                 -- pre- and post-statements.
-                 | ForRange a (AssignOrDecl a) (Expression a)
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | A declaration in a statement list.
+  DeclStmt :: a
+           -> f Decl
+           -> NodeF a f Stmt
 
--- | An assignment ('=') or declaration ('=') for ForRange and
--- CommReceive. Because the Functor instance for Either doesn't work for us.
-data AssignOrDecl a = Assign [Expression a]
-                    | Decl [Id a]
-                    | AODNone
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  DeferStmt :: a
+            -> f Expr -- ^ call expression
+            -> NodeF a f Stmt
 
+  EmptyStmt :: a -> NodeF a f Stmt
 
--- | Communication clause for the select statement
-data CommClause a = CommClause a (CommOp a) {- ^if CommNone, it's a default clause -} [Statement a]
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | A (stand-alone) expression in a statement list.
+  ExprStmt :: a
+           -> f Expr
+           -> NodeF a f Stmt
 
-data CommOp a = CommSend a (Expression a) (Expression a)
-              | CommReceive a (AssignOrDecl a) (Expression a)
-              | CommNone a
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  ForStmt :: a
+          -> Maybe (f Stmt) -- ^ initialization statement; or nil
+          -> Maybe (f Expr) -- ^ condition; or nil
+          -> Maybe (f Stmt) -- ^ post iteration statement; or nil
+          -> f Block -- ^ loop body
+          -> NodeF a f Stmt
 
-data ConstSpec a = ConstSpec a (NonEmpty (Id a)) (Maybe ((Maybe (Type a)), (NonEmpty (Expression a))))
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  GoStmt :: a
+         -> f Expr -- ^ call expression
+         -> NodeF a f Stmt
 
-data VarSpec a = TypedVarSpec a (NonEmpty (Id a)) (Type a) [Expression a]
-               | UntypedVarSpec a (NonEmpty (Id a)) (NonEmpty (Expression a))
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  IfStmt :: a
+         -> Maybe (f Stmt) -- ^ initialization statement; or nil
+         -> f Expr -- ^ condition
+         -> f Block -- ^ body
+         -> Maybe (f Stmt) -- ^ else branch; or nil
+         -> NodeF a f Stmt
 
--- | Type specification
-data TypeSpec a = TypeSpec a (Id a) (Type a)
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | An increment or decrement statement.
+  IncDecStmt :: a
+             -> f Expr -- ^ inner expression
+             -> Bool -- ^ true if increment, false if decrement
+             -> NodeF a f Stmt
 
--- | Types
-data Type a = NamedType a (TypeName a)
-            | ArrayType a (Maybe (Expression a))
-              -- ^Length. If Nothing, then the length is to be
-              -- determined from that of the literal. Hence, Nothing
-              -- is only valid for Literal Types
-              (Type a) -- ^Element type
-            | StructType a [FieldDecl a]
-            | PointerType a (Type a)
-            | FunctionType a (ParameterList a) (ReturnList a)
-            | InterfaceType a [MethodSpec a]
-            | SliceType a (Type a)
-            -- ^A slice type denotes the set of all slices of arrays
-            -- of its element type.
-            | MapType a (Type a) (Type a)
-            | ChannelType a (ChannelDirection a) (Type a)
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  LabeledStmt :: a
+              -> Ident -- ^ label
+              -> f Stmt
+              -> NodeF a f Stmt
 
--- | Named types
-data TypeName a = TypeName a (Maybe (Id a)) -- ^Package id for qualified names
-                             (Id a) -- ^Type identifier
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | A for statement with a range clause.
+  RangeStmt :: a
+            -> Maybe (f Expr) -- ^ key
+            -> Maybe (f Expr) -- ^ value
+            -> f Expr -- ^ value to range over
+            -> f Block -- ^ body
+            -> Bool -- ^ is assign?
+            -> NodeF a f Stmt
 
--- | Parameter lists
-data ParameterList a = NamedParameterList a [NamedParameter a] (Maybe (NamedParameter a)) -- ^The last one is the optional variadic parameter
-                     | AnonymousParameterList a [AnonymousParameter a] (Maybe (AnonymousParameter a))
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  ReturnStmt :: a
+             -> [f Expr] -- ^ result expressions
+             -> NodeF a f Stmt
 
+  SelectStmt :: a
+             -> f Block -- ^ body (CommClauseStmts only)
+             -> NodeF a f Stmt
 
--- | Return lists
-data ReturnList a = NamedReturnList a [NamedParameter a]
-                  | AnonymousReturnList a [AnonymousParameter a]
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  SendStmt :: a
+           -> f Expr -- ^ channel
+           -> f Expr -- ^ value
+           -> NodeF a f Stmt
 
--- | Named parameters. Unzipped so that identifiers are paired with types. (As opposed to the grammar where every)
-data NamedParameter a = NamedParameter a (Id a) (Type a)
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | An expression switch statement.
+  SwitchStmt :: a
+             -> Maybe (f Stmt) -- ^ initialization statement; or nil
+             -> Maybe (f Expr) -- ^ tag expression; or nil
+             -> f Block -- ^ body (CaseClauseStmts only)
+             -> NodeF a f Stmt
 
-type AnonymousParameter = Type
+  TypeSwitchStmt :: a
+                 -> Maybe (f Stmt) -- ^ initialization statement; or nil
+                 -> f Stmt -- ^ x := y.(type) or y.(type)
+                 -> f Block -- ^ body (CaseClauseStmts only)
+                 -> NodeF a f Stmt
 
--- | Identifiers
-data Id a = Id a Binding Text -- ^are either names
-          | BlankId a -- ^or blank ("_")
-  deriving (Data, Typeable, Functor, Foldable, Traversable)
+  -- | A case of an expression or type switch statement.
+  CaseClauseStmt :: a
+                 -> [f Expr] -- ^ list of expressions or types; nil
+                             -- means default case
+                 -> [f Stmt] -- ^ statement list
+                 -> NodeF a f Stmt
 
-instance Show a => Show (Id a) where
-  show (Id a b n) = show n ++ "@" ++ show a ++ " " ++ show b
-  show (BlankId a) = "_@" ++ show a
+  -- | A case of a select statement.
+  CommClauseStmt :: a
+                 -> Maybe (f Stmt) -- ^ send or receive statement; nil
+                                   -- means default case
+                 -> [f Stmt] -- ^ body
+                 -> NodeF a f Stmt
 
--- | Statement labels
-data Label a = Label a Text
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | A top-level initializer (never appears in source code,
+  -- generated by Go's typechecker).
+  InitializerStmt :: [f Expr] -- ^ list of constant/variable identifiers
+                  -> [f Expr] -- ^ initial values
+                  -> NodeF a f Stmt
 
--- | Field declaration
-data FieldDecl a = NamedFieldDecl a (NonEmpty (Id a)) (Type a) (Maybe (Tag a))
-                 | AnonymousFieldDecl a (TypeName a) (Maybe (Tag a))
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
-                 
+  ----------------------------------------------------------------------
+  -- Expressions
 
-data Tag a = Tag a Text
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | A literal of basic type. 
+  BasicLitExpr :: a -> Type -> BasicLit -> NodeF a f Expr
 
--- | Method specification
-data MethodSpec a = MethodSpec a (Id a) (ParameterList a) (ReturnList a) | InterfaceSpec a (TypeName a)
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | A constant value produced by the Go typechecker's constant
+  -- evaluator (most literals end up as one of these rather than a
+  -- BasicLitExpr).
+  BasicConstExpr :: a -> Type -> BasicConst -> NodeF a f Expr
 
-data ChannelDirection a = Send a | Recv a | Duplex a
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  BinaryExpr :: a -> Type
+             -> f Expr -- ^ left operand
+             -> BinaryOp -- ^ operator
+             -> f Expr -- ^ right operand
+             -> NodeF a f Expr
 
-data Receiver a = Receiver a (Maybe (Id a)) Bool {- Pointed? -} (TypeName a)
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | An expression followed by an argument list.
+  CallExpr :: a -> Type
+           -> f Expr -- ^ function expression
+           -> [f Expr] -- ^ function arguments
+           -> NodeF a f Expr
 
-data Expression a = NilLit a
-                  | BoolLit a Bool
-                  | IntLit a Integer
-                  | FloatLit a Double
-                  | ImaginaryLit a Double
-                  | RuneLit a Char
-                  | StringLit a Text
-                  | FunctionLit a (ParameterList a) (ReturnList a) [Statement a]
-                  | CompositeLit a (Type a) [Element a]
-                  | MethodExpr a (Receiver a) (Id a)
-                  | CallExpr a (Expression a) (Maybe (Type a)) [Expression a] (Maybe (Expression a)) -- ^The last is the optional variadic spread parameter
-                  | Name a (Maybe (Id a)) (Id a)
-                  | BinaryExpr a BinaryOp (Expression a) (Expression a)
-                  | UnaryExpr a UnaryOp (Expression a)
-                  | Conversion a (Type a) (Expression a) -- ^Type casts (conversions)
-                  | FieldSelector a (Expression a) (Id a)
-                  | IndexExpr a (Expression a) (Expression a)
-                  | SliceExpr a (Expression a) (Maybe (Expression a)) (Maybe (Expression a)) (Maybe (Expression a))
-                  | TypeAssertion a (Expression a) (Type a)
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  CastExpr :: a -> Type
+           -> f Expr -- ^ expression being cast
+           -> f Expr -- ^ type to cast to
+           -> NodeF a f Expr
 
--- | Elements of container literals
-data Element a = Element a (Expression a)
-               | KeyedEl a (Key a) (Expression a)
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  -- | A composite literal.
+  CompositeLitExpr :: a -> Type
+                   -> Maybe (f Expr) -- ^ literal type; or nil
+                   -> [f Expr] -- ^ list of composite elements
+                   -> NodeF a f Expr
 
-data Key a = FieldKey a (Id a)
-           | ExprKey a (Expression a)
-  deriving (Show, Data, Typeable, Functor, Foldable, Traversable)
+  IdentExpr :: a -> Type
+            -> Maybe Ident -- ^ Optional qualifier
+            -> Ident -- ^ name
+            -> NodeF a f Expr
 
--- | Binary operators
-data BinaryOp = Add | Subtract | Multiply | Divide | Remainder
-              | BitwiseAnd | BitwiseNAnd | BitwiseOr | BitwiseXOr
-              | LeftShift  | RightShift
-              | LogicalAnd | LogicalOr
-              | Equals | NotEquals | Less | Greater | LessEq | GreaterEq
-  deriving (Show, Data, Typeable)
+  -- | An Ellipsis node stands for the "..." type in a parameter list
+  -- or the "..." length in an array type.
+  EllipsisExpr :: a -> Type
+               -> Maybe (f Expr) -- ^ ellipsis element type (parameter
+                                 -- lists only); or nil
+               -> NodeF a f Expr
+  
+  -- | A function literal.
+  FuncLitExpr :: a -> Type
+              -> [f Field] -- ^ function parameter types
+              -> [f Field] -- ^ function return types
+              -> f Block -- ^ function body
+              -> NodeF a f Expr
 
--- | Unary operators
-data UnaryOp = Plus | Minus | Not | Complement | Receive | Address | Deref
-  deriving (Show, Data, Typeable)
+  -- | An expression followed by an index.
+  IndexExpr :: a -> Type
+            -> f Expr -- ^ expression
+            -> f Expr -- ^ index
+            -> NodeF a f Expr
 
-deriving instance Data SourceRange
-deriving instance Typeable SourceRange
-deriving instance Data SourcePos
-deriving instance Typeable SourcePos
+  -- | (key : value) pairs in composite literals.
+  KeyValueExpr :: a -> Type
+               -> f Expr -- ^ key
+               -> f Expr -- ^ value
+               -> NodeF a f Expr
 
+  -- | A parenthesized expression.
+  ParenExpr :: a -> Type
+            -> f Expr -- ^ parenthesized expression
+            -> NodeF a f Expr
 
--- | NOTE: the following definitions are not part of the abstract
--- syntax, but are used for typechecking purposes.
+  -- | An expression followed by a selector.
+  SelectorExpr :: a -> Type
+               -> f Expr -- ^ expression
+               -> Ident -- ^ field selector
+               -> NodeF a f Expr
 
--- | The type of data that can be stored in Go (variables and fields)
-data VarType = Int (Maybe Int) {- ^ Bitwidth. Architecture-dependent if `Nothing` -} Bool {- ^ Signed? -}
-             | Boolean
-             | Float Int {- ^ Bitwidth -}
-             | Complex Int  {- ^ Bitwidth -}
-             | Iota
-             | Nil
-             | String
-             | Function (Maybe VarType) -- ^ Method receiver type
-               [VarType] -- ^ Parameter types
-               (Maybe  VarType) -- ^ Spread parameter
-               [VarType] -- ^ Return types
-             | Array (Maybe (Expression ())) VarType
-             | Struct (Map Text (VarType, Maybe Text))
-             | Pointer VarType
-             | Interface (Map Text VarType)
-             | Map VarType VarType
-             | Slice VarType
-             | Channel (ChannelDirection ()) VarType
-             | Alias (TypeName ())
-             | Tuple [VarType]
-             | BuiltIn Text
-  deriving (Data, Typeable, Show)
+  -- | An expression followed by slice indices.
+  SliceExpr :: a -> Type
+            -> f Expr -- ^ expression
+            -> Maybe (f Expr) -- ^ begin of slice range; or nil
+            -> Maybe (f Expr) -- ^ end of slice range; or nil
+            -> Maybe (f Expr) -- ^ maximum capacity of slice; or nil
+            -> Bool -- ^ true if 3-index slice (2 colons present)
+            -> NodeF a f Expr
 
--- | The type of constants ("untyped constants" in the spec) together
--- with their value (for deciding representability)
-data ConstType = CBool Bool
-               | CRune Char
-               | CInt Integer
-               | CFloat Double
-               | CComplex Double Double
-               | CString Text
-  deriving (Data, Typeable, Show, Eq)
+  -- | An expression of the form "*" Expression.
+  StarExpr :: a -> Type
+           -> f Expr -- ^ operand
+           -> NodeF a f Expr
 
-data ExprType = VarType VarType
-              | ConstType ConstType
-  deriving (Data, Typeable, Show)
+  -- | An expression followed by a type assertion.
+  TypeAssertExpr :: a -> Type
+                 -> f Expr -- ^ expression
+                 -> Maybe (f Expr) -- ^ asserted type; nil means type
+                                   -- switch X.(type)
+                 -> NodeF a f Expr
 
-data BindingKind = TypeB VarType
-                 | VarB VarType
-                 | ConstB VarType
-                 | PackageB (Maybe Text) (HashMap Text Binding)
-                 | FieldOrMethodB VarType
-                 | Unbound
-  deriving (Data, Typeable, Show)
+  -- | A unary expression. Unary "*" expressions are represented via
+  -- StarExpr nodes.
+  UnaryExpr :: a -> Type
+            -> UnaryOp -- ^ operator
+            -> f Expr -- ^ operand
+            -> NodeF a f Expr
 
+  ----------------------------------------------------------------------
+  -- Type expressions
 
-data Binding = Binding {_bindingDeclLoc :: SourceRange
-                       ,_bindingKind :: BindingKind
-                       ,_bindingImported :: Bool
-                       ,_bindingThisScope :: Bool
-                       }
-  deriving (Data, Typeable)
+  -- | Named type (includes basic types like bool, int32, etc.)
+  NamedTypeExpr :: a -> Type -> Ident -> NodeF a f Expr
 
-instance Show Binding where
-  show b = "(bound at " ++ show (_bindingDeclLoc b) ++ " to " ++ show (_bindingKind b) ++ " (" ++ if _bindingImported b then "imported " else "" ++ if _bindingThisScope b then "local" else "" ++ ")"
+  PointerTypeExpr :: a -> Type
+                  -> f Expr
+                  -> NodeF a f Expr
 
-instance Default Binding where
-  def = Binding def def False False
+  -- | An array or slice type.
+  ArrayTypeExpr :: a -> Type
+                -> Maybe (f Expr) -- ^ length. Ellipsis for [...]T
+                                  -- array types, nil for slice types
+                -> f Expr -- ^ element type
+                -> NodeF a f Expr
 
-instance Default BindingKind where
-  def = Unbound
+  FuncTypeExpr :: a -> Type
+               -> [f Field] -- ^ (incoming) parameters; non-nil
+               -> Maybe (f Field) -- ^ variadic parameter
+               -> [f Field] -- ^ (outgoing) results
+               -> NodeF a f Expr
 
-instance Default SourceRange where
-  def = SourceRange def def
+  InterfaceTypeExpr :: a -> Type
+                    -> [f Field] -- ^ list of methods
+                    -> Bool -- ^ true if (source) methods are missing
+                            -- in the methods list
+                    -> NodeF a f Expr
 
-instance Default SourcePos where
-  def = SourcePos (-1) (-1) (-1) "<internal>"
+  MapTypeExpr :: a -> Type
+              -> f Expr -- ^ key type
+              -> f Expr -- ^ value type
+              -> NodeF a f Expr
 
--- | Changes all the labels in the tree to another one, given by a
--- function.
-reannotate :: Traversable t => (a -> b) -> t a -> t b
-reannotate f tree = traverse (pure . f) tree ()
+  StructTypeExpr :: a -> Type
+                 -> [f Field] -- ^ list of field declarations
+                 -> NodeF a f Expr
 
-makeLenses ''Binding
+  ChanTypeExpr :: a -> Type
+               -> ChanDir -- ^ channel direction
+               -> f Expr -- ^ value type
+               -> NodeF a f Expr
 
-makeAnnotationLenses [''Package
-                     ,''File
-                     ,''ImportDecl
-                     ,''ImportSpec
-                     ,''Statement
-                     ,''ExprClause
-                     ,''TypeSwitchGuard
-                     ,''TypeClause
-                     ,''ForClause
-                     ,''CommClause
-                     ,''CommOp
-                     ,''ConstSpec
-                     ,''VarSpec
-                     ,''TypeSpec
-                     ,''Type
-                     ,''TypeName
-                     ,''ParameterList
-                     ,''ReturnList
-                     ,''NamedParameter
-                     ,''Id
-                     ,''Label
-                     ,''FieldDecl
-                     ,''Tag
-                     ,''MethodSpec
-                     ,''Receiver
-                     ,''Expression
-                     ,''Element
-                     ,''Key
-                     ,''ChannelDirection
-                     ,''TopLevel
-                     ,''Declaration
-                     ]
+  -- | Internal language only
+  TupleExpr :: a -> Type
+            -> [f Expr]
+            -> NodeF a f Expr
 
+  -- | Internal language only
+  ProjExpr :: a -> Type
+           -> f Expr
+           -> Int
+           -> NodeF a f Expr
+
+  -- | Internal language only
+  NilExpr :: a -> Type -> NodeF a f Expr
+
+  ----------------------------------------------------------------------
+  -- Declarations
+
+  FuncDecl :: a
+           -> Maybe (f Field) -- ^ receiver (methods); or nil (functions)
+           -> Ident -- ^ function/method name
+           -> [f Field] -- ^ parameters
+           -> Maybe (f Field) -- ^ variadic parameter
+           -> [f Field] -- ^ results
+           -> Maybe (f Block) -- ^ function body; or nil for external
+                              -- (non-Go) function
+           -> NodeF a f Decl
+
+  -- | (generic declaration node) An import, constant, type or
+  -- variable declaration.
+  GenDecl :: a
+          -> [f Spec] -- ^ specs
+          -> NodeF a f Decl
+
+  TypeAliasDecl :: a
+                -> [f Bind]
+                -> NodeF a f Decl
+
+  ----------------------------------------------------------------------
+  -- Variable type binding
+  
+  Binding :: Ident
+          -> f Expr
+          -> NodeF a f Bind
+
+  ----------------------------------------------------------------------
+  -- Specifications
+  
+  -- | A single package import.
+  ImportSpec :: a
+             -> Maybe Ident -- ^ local package name (including "."); or nil
+             -> Text -- ^ import path
+             -> NodeF a f Spec
+
+  -- | A constant declaration.
+  ConstSpec :: a
+            -> [Ident] -- ^ value names (nonempty)
+            -> Maybe (f Expr) -- ^ value type; or nil
+            -> [f Expr] -- ^ initial values
+            -> NodeF a f Spec
+
+  -- | A variable declaration.
+  VarSpec :: a
+          -> [Ident] -- ^ value names (nonempty)
+          -> Maybe (f Expr) -- ^ value type; or nil
+          -> [f Expr] -- ^ initial values
+          -> NodeF a f Spec
+
+  -- | A type declaration (TypeSpec production).
+  TypeSpec :: a
+           -> Ident -- ^ type name
+           -> f Expr -- ^ IdentExpr, ParenExpr, SelectorExpr,
+                     -- StarExpr, or any xxxTypeExpr
+           -> NodeF a f Spec
+
+  ----------------------------------------------------------------------
+  -- Misc
+  
+  -- | A Field represents a Field declaration list in a struct type, a
+  -- method list in an interface type, or a parameter/result
+  -- declaration in a signature. Field.Names is nil for unnamed
+  -- parameters (parameter lists which only contain types) and
+  -- embedded struct fields. In the latter case, the field name is the
+  -- type name.
+  FieldNode :: [Ident] -- ^ field/method/parameter names; or nil
+            -> f Expr -- ^ field/method/parameter type
+            -> Maybe BasicLit -- ^ field tag; or nil
+            -> NodeF a f Field
+  
+  -- | A braced statement list.
+  BlockNode :: [f Stmt]
+            -> NodeF a f Block
+
+data AssignType =
+  Assign
+  | Define
+  | AssignOperator
+  deriving (Eq, Show)
+
+data BranchType =
+  Break
+  | Continue
+  | Goto
+  | Fallthrough
+  deriving (Eq, Show)
+
+data BasicLitType =
+  LiteralBool
+  | LiteralInt
+  | LiteralFloat
+  | LiteralComplex
+  | LiteralImag
+  | LiteralChar
+  | LiteralString
+  deriving (Eq, Show)
+
+-- | A literal of basic type. 
+data BasicLit =
+  BasicLit
+  { basiclit_type :: BasicLitType -- ^ "kind" of the literal
+  , basiclit_value :: Text -- ^ literal value as a string
+  }
+  deriving (Eq, Show)
+
+data BasicConst =
+  BasicConstBool Bool
+  | BasicConstString Text
+  | BasicConstInt Integer
+  | BasicConstFloat BasicConst BasicConst -- ^ Numerator and denominator ints
+  | BasicConstComplex BasicConst BasicConst -- ^ Real and imaginary floats
+  deriving (Eq, Show)
+
+data BinaryOp =
+  BPlus -- ^ +
+  | BMinus -- ^ -
+  | BMult -- ^ *
+  | BDiv -- ^ /
+  | BMod -- ^ %
+  | BAnd -- ^ &
+  | BOr -- ^ |
+  | BXor -- ^ ^
+  | BShiftL -- ^ <<
+  | BShiftR -- ^ >>
+  | BAndNot -- ^ &^
+  | BLAnd -- ^ logical AND
+  | BLOr -- ^ logical OR
+  | BEq -- ^ ==
+  | BLt -- ^ <
+  | BGt -- ^ >
+  | BNeq -- ^ !=
+  | BLeq -- ^ <=
+  | BGeq -- ^ >=
+  deriving (Eq, Show)
+
+data UnaryOp =
+  UPlus -- ^ +
+  | UMinus -- ^ -
+  | UNot -- ^ !
+  | UBitwiseNot -- ^ ^
+  | UStar -- ^ *
+  | UAddress -- ^ &
+  | UArrow -- ^ <-
+  deriving (Eq, Show)
+
+annotOf :: NodeF a f Expr -> a
+annotOf (BasicLitExpr x _ _) = x
+annotOf (BasicConstExpr x _ _) = x
+annotOf (BinaryExpr x _ _ _ _) = x
+annotOf (CallExpr x _ _ _) = x
+annotOf (CastExpr x _ _ _) = x
+annotOf (CompositeLitExpr x _ _ _) = x
+annotOf (IdentExpr x _ _ _) = x
+annotOf (EllipsisExpr x _ _) = x
+annotOf (FuncLitExpr x _ _ _ _) = x
+annotOf (IndexExpr x _ _ _) = x
+annotOf (KeyValueExpr x _ _ _) = x
+annotOf (ParenExpr x _ _) = x
+annotOf (SelectorExpr x _ _ _) = x
+annotOf (SliceExpr x _ _ _ _ _ _) = x
+annotOf (StarExpr x _ _) = x
+annotOf (TypeAssertExpr x _ _ _) = x
+annotOf (UnaryExpr x _ _ _) = x
+annotOf (NamedTypeExpr x _ _) = x
+annotOf (PointerTypeExpr x _ _) = x
+annotOf (ArrayTypeExpr x _ _ _) = x
+annotOf (FuncTypeExpr x _ _ _ _) = x
+annotOf (InterfaceTypeExpr x _ _ _) = x
+annotOf (MapTypeExpr x _ _ _) = x
+annotOf (StructTypeExpr x _ _) = x
+annotOf (ChanTypeExpr x _ _ _) = x
+annotOf (TupleExpr x _ _) = x
+annotOf (ProjExpr x _ _ _) = x
+annotOf (NilExpr x _) = x
+
+annotOf' :: Node a Expr -> a
+annotOf' = annotOf . out
+
+typeOf :: NodeF a f Expr -> Type
+typeOf (BasicLitExpr _ tp _) = tp
+typeOf (BasicConstExpr _ tp _) = tp
+typeOf (BinaryExpr _ tp _ _ _) = tp
+typeOf (CallExpr _ tp _ _) = tp
+typeOf (CastExpr _ tp _ _) = tp
+typeOf (CompositeLitExpr _ tp _ _) = tp
+typeOf (IdentExpr _ tp _ _) = tp
+typeOf (EllipsisExpr _ tp _) = tp
+typeOf (FuncLitExpr _ tp _ _ _) = tp
+typeOf (IndexExpr _ tp _ _) = tp
+typeOf (KeyValueExpr _ tp _ _) = tp
+typeOf (ParenExpr _ tp _) = tp
+typeOf (SelectorExpr _ tp _ _) = tp
+typeOf (SliceExpr _ tp _ _ _ _ _) = tp
+typeOf (StarExpr _ tp _) = tp
+typeOf (TypeAssertExpr _ tp _ _) = tp
+typeOf (UnaryExpr _ tp _ _) = tp
+typeOf (NamedTypeExpr _ tp _) = tp
+typeOf (PointerTypeExpr _ tp _) = tp
+typeOf (ArrayTypeExpr _ tp _ _) = tp
+typeOf (FuncTypeExpr _ tp _ _ _) = tp
+typeOf (InterfaceTypeExpr _ tp _ _) = tp
+typeOf (MapTypeExpr _ tp _ _) = tp
+typeOf (StructTypeExpr _ tp _) = tp
+typeOf (ChanTypeExpr _ tp _ _) = tp
+typeOf (TupleExpr _ tp _) = tp
+typeOf (ProjExpr _ tp _ _) = tp
+typeOf (NilExpr _ tp) = tp
+
+typeOf' :: Node a Expr -> Type
+typeOf' = typeOf . out
+
+deriving instance (Eq a, forall n. Eq (f n)) => Eq (NodeF a f i)
+deriving instance (Show a, forall n. Show (f n)) => Show (NodeF a f i)
+deriving instance Eq a => Eq (Fix (NodeF a) i)
+deriving instance Show a => Show (Fix (NodeF a) i)
+
+-- $(return [])
+
+instance FunctorFC (NodeF a) where
+  fmapFC = fmapFCDefault
+
+instance FoldableFC (NodeF a) where
+  foldMapFC = foldMapFCDefault
+
+-- It would be nice to derive this automatically but using
+-- structuralTraversal.
+instance TraversableFC (NodeF a) where
+  traverseFC f (MainNode nm pkg pkgs) =
+    MainNode nm <$> f pkg <*> traverse f pkgs
+  traverseFC f (PackageNode name path imports file_paths files inits) =
+    PackageNode name path imports file_paths <$>
+    traverse f files <*> traverse f inits
+  traverseFC f (FileNode path name decls imports) =
+    FileNode path name <$> traverse f decls <*> traverse f imports
+  traverseFC f (BlockNode stmts) = BlockNode <$> traverse f stmts
+  traverseFC f (AssignStmt x tp op lhs rhs) =
+    AssignStmt x tp op <$> traverse f lhs <*> traverse f rhs
+  traverseFC f (BlockStmt x stmt) = BlockStmt x <$> f stmt
+  traverseFC _f (BranchStmt x tp lbl) = pure $ BranchStmt x tp lbl
+  traverseFC f (DeclStmt x decl) = DeclStmt x <$> f decl
+  traverseFC f (DeferStmt x e) = DeferStmt x <$> f e
+  traverseFC _f (EmptyStmt x) = pure $ EmptyStmt x
+  traverseFC f (ExprStmt x e) = ExprStmt x <$> f e
+  traverseFC f (ForStmt x ini cond post body) =
+    ForStmt x <$> traverse f ini <*>
+    traverse f cond <*> traverse f post <*> f body
+  traverseFC f (GoStmt x e) = GoStmt x <$> f e
+  traverseFC f (IfStmt x ini cond body els) =
+    IfStmt x <$> traverse f ini <*> f cond <*> f body <*> traverse f els
+  traverseFC f (IncDecStmt x e b) = IncDecStmt x <$> f e <*> pure b
+  traverseFC f (LabeledStmt x lbl stmt) = LabeledStmt x lbl <$> f stmt
+  traverseFC f (RangeStmt x key value range body assign) =
+    RangeStmt x <$> traverse f key <*>
+    traverse f value <*> f range <*> f body <*> pure assign
+  traverseFC f (ReturnStmt x es) = ReturnStmt x <$> traverse f es
+  traverseFC f (SelectStmt x body) = SelectStmt x <$> f body
+  traverseFC f (SendStmt x chan value) = SendStmt x <$> f chan <*> f value
+  traverseFC f (SwitchStmt x ini tag body) =
+    SwitchStmt x <$> traverse f ini <*> traverse f tag <*> f body
+  traverseFC f (TypeSwitchStmt x ini assign body) =
+    TypeSwitchStmt x <$> traverse f ini <*> f assign <*> f body
+  traverseFC f (CaseClauseStmt x es stmts) =
+    CaseClauseStmt x <$> traverse f es <*> traverse f stmts
+  traverseFC f (CommClauseStmt x stmt stmts) =
+    CommClauseStmt x <$> traverse f stmt <*> traverse f stmts
+  traverseFC f (InitializerStmt vars values) =
+    InitializerStmt <$> traverse f vars <*> traverse f values
+  traverseFC _f (BasicLitExpr x tp lit) = pure $ BasicLitExpr x tp lit
+  traverseFC _f (BasicConstExpr x tp c) = pure $ BasicConstExpr x tp c
+  traverseFC f (BinaryExpr x tp left op right) =
+    BinaryExpr x tp <$> f left <*> pure op <*> f right
+  traverseFC f (CallExpr x tp fun args) =
+    CallExpr x tp <$> f fun <*> traverse f args
+  traverseFC f (CastExpr x tp e ty) = CastExpr x tp <$> f e <*> f ty
+  traverseFC f (CompositeLitExpr x tp ty es) =
+    CompositeLitExpr x tp <$> traverse f ty <*> traverse f es
+  traverseFC _f (IdentExpr x tp qual ident) = pure $ IdentExpr x tp qual ident
+  traverseFC f (EllipsisExpr x tp ty) = EllipsisExpr x tp <$> traverse f ty
+  traverseFC f (FuncLitExpr x tp params results body) =
+    FuncLitExpr x tp <$> traverse f params <*> traverse f results <*> f body
+  traverseFC f (IndexExpr x tp e ix) = IndexExpr x tp <$> f e <*> f ix
+  traverseFC f (KeyValueExpr x tp key value) =
+    KeyValueExpr x tp <$> f key <*> f value
+  traverseFC f (ParenExpr x tp e) = ParenExpr x tp <$> f e
+  traverseFC f (SelectorExpr x tp e ident) =
+    SelectorExpr x tp <$> f e <*> pure ident
+  traverseFC f (SliceExpr x tp e begin end m b) =
+    SliceExpr x tp <$> f e <*> traverse f begin <*>
+    traverse f end <*> traverse f m <*> pure b
+  traverseFC f (StarExpr x tp e) = StarExpr x tp <$> f e
+  traverseFC f (TypeAssertExpr x tp e ty) =
+    TypeAssertExpr x tp <$> f e <*> traverse f ty
+  traverseFC f (UnaryExpr x tp op e) = UnaryExpr x tp op <$> f e
+  traverseFC _f (NamedTypeExpr x tp nm) = pure $ NamedTypeExpr x tp nm
+  traverseFC f (PointerTypeExpr x tp ty) = PointerTypeExpr x tp <$> f ty
+  traverseFC f (ArrayTypeExpr x tp len ty) =
+    ArrayTypeExpr x tp <$> traverse f len <*> f ty
+  traverseFC f (FuncTypeExpr x tp params variadic results) =
+    FuncTypeExpr x tp <$> traverse f params <*>
+    traverse f variadic <*> traverse f results
+  traverseFC f (InterfaceTypeExpr x tp methods b) =
+    InterfaceTypeExpr x tp <$> traverse f methods <*> pure b
+  traverseFC f (MapTypeExpr x tp key value) =
+    MapTypeExpr x tp <$> f key <*> f value
+  traverseFC f (StructTypeExpr x tp fields) =
+    StructTypeExpr x tp <$> traverse f fields
+  traverseFC f (ChanTypeExpr x tp dir ty) = ChanTypeExpr x tp dir <$> f ty
+  traverseFC f (TupleExpr x tp es) = TupleExpr x tp <$> traverse f es
+  traverseFC f (ProjExpr x tp e i) = ProjExpr x tp <$> f e <*> pure i
+  traverseFC _f (NilExpr x tp) = pure $ NilExpr x tp
+  traverseFC f (FuncDecl x recv nm params variadic results body) =
+    FuncDecl x <$> traverse f recv <*> pure nm <*> traverse f params <*>
+    traverse f variadic <*> traverse f results <*> traverse f body
+  traverseFC f (GenDecl x specs) = GenDecl x <$> traverse f specs
+  traverseFC f (TypeAliasDecl x binds) = TypeAliasDecl x <$> traverse f binds
+  traverseFC f (Binding ident e) = Binding ident <$> f e
+  traverseFC _f (ImportSpec x name path) = pure $ ImportSpec x name path
+  traverseFC f (ConstSpec x names ty es) =
+    ConstSpec x names <$> traverse f ty <*> traverse f es
+  traverseFC f (VarSpec x names ty es) =
+    VarSpec x names <$> traverse f ty <*> traverse f es
+  traverseFC f (TypeSpec x name e) = TypeSpec x name <$> f e
+  traverseFC f (FieldNode names ty tag) = FieldNode names <$> f ty <*> pure tag
+
+-- TODO
+-- traverseNodeF :: forall m a f g tp. Applicative m =>
+--                  (forall u. f u -> m (g u)) ->
+--                  NodeF a f tp -> m (NodeF a g tp)
+-- -- traverseNodeF = $(U.structuralTraversal [t|NodeF|] [])
+-- traverseNodeF = $(U.structuralTraversal [t|NodeF|]
+--                   -- [(U.ConType [t|[]|] `U.TypeApp` U.AnyType, [|traverse|])
+--                   -- , (U.ConType [t|Maybe|] `U.TypeApp` U.AnyType, [|traverse|])]
+--                    -- [(U.ConType [t|[]|] `U.TypeApp` U.AnyType `U.TypeApp` U.AnyType, [|traverse|]),
+--                    [
+--                      -- (U.ConType [t|Maybe|] `U.TypeApp` (U.AnyType `U.TypeApp` U.AnyType), [|traverse|])
+--                    ]
+--                  )
+
+-- -- traverseNodeF :: forall ext m f g tp. Applicative m
+-- --               => (forall u . f u -> m (g u))
+-- --               -> NodeF ext f tp -> m (NodeF ext g tp)
+-- -- traverseNodeF = $(U.structuralTraversal [t|NodeF|] [])
+
+-- instance TraversableFC (NodeF a) where
+--   -- traverseFC = $(U.structuralTraversal [t|NodeF|] [])
+--   traverseFC = traverseNodeF
+
+packageName :: Node a Package -> Text
+packageName (In (PackageNode nm _path _imports _file_paths _files _inits)) = nm
+
+fileName :: Node a File -> Text
+fileName (In (FileNode _path (Ident _k nm) _decls _imports)) = nm
+
+fieldType :: Node a Field -> Type
+fieldType (In (FieldNode _names tp_expr _tag)) = typeOf' tp_expr
+
+declSpecs :: Node a Decl -> [Node a Spec]
+declSpecs (In (GenDecl _x specs)) = specs
+declSpecs _decl = error "declSpecs: expected GenDecl"
+
+readBool :: Text -> Bool
+readBool s = case s of
+  "true" -> True
+  "false" -> False
+  _ -> error $ "readBool: not a bool: " ++ show s

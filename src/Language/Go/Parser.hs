@@ -1,695 +1,364 @@
-{-# LANGUAGE LambdaCase, FlexibleContexts, FlexibleInstances, TupleSections, OverloadedStrings #-}
-module Language.Go.Parser (parsePackage
-                          ,parseFile
-                          ,parseText
-                          ,defaultPackageLoader
-                          ,SourceRange(..)
-                          ,SourcePos(..)
-                          ,Parser
-                          ,ParserAnnotation
-                          ) where
+{-|
+Module      : Lang.Crucible.Go.Parser
+Description : JSON AST deserializer
+Maintainer  : abagnall@galois.com
+Stability   : experimental
 
-import Language.Go.Parser.Ambiguous
-import Language.Go.AST
-import Language.Go.Parser.Lexer
-import Language.Go.Parser.State
-import Language.Go.Parser.Util
-import Language.Go.Bindings
-import Language.Go.Bindings.Types
-import Language.Go.Types
+Parse JSON-encoded Go ASTs.
+-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE UndecidableInstances #-}
+module Language.Go.Parser (parseMain, SourcePos) where
 
-import System.IO (FilePath)
-import AlexTools (SourceRange(..), initialInput)
-import Data.Text (Text, unpack)
-import qualified Data.Text as T
-import Data.Text.IO
-import Control.Monad.State.Strict
-import Control.Monad.Except
-import Data.HashMap.Strict (HashMap)
+import           Data.Aeson
+import           Data.ByteString.Lazy (ByteString)
 import qualified Data.HashMap.Strict as HM
-import Data.Maybe (fromJust, isNothing, maybeToList)
-import Control.Monad.Trans (lift)
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad (liftM, unless)
-import Lens.Simple
-import Data.Default.Class
-import System.Environment (lookupEnv)
-import System.Directory
-import System.FilePath
-import Data.List.NonEmpty (NonEmpty(..), nonEmpty)
-import qualified Data.List.NonEmpty as NE
-import Data.Bifunctor hiding (second)
-import Control.Arrow ( (***), second )
-import Control.Applicative
-import Data.Char (generalCategory, GeneralCategory (..))
-import Data.Generics.Uniplate.Data
-
-import Prelude hiding ( readFile )
-import Debug.Trace
-
--- | We don't resolve types for now, so all bindings are typed with this type
-noType :: VarType
-noType = Nil
-
-runParser :: Parser a -> IO (Either (SourceRange, String) a)
-runParser = (`evalStateT` def) . runExceptT
-
-parseText :: Text -- ^ File name
-          -> Text -- ^ Text of the file/module
-          -> (Text -> Parser (Package SourceRange))
-          -- ^ A resolver/loader function for imported
-          -- modules. Implementations are encouraged to use
-          -- `parsePackage`. For an example implementation see
-          -- `defaultPackageLoader` and `parsePackage`.
-          -> IO (Either (SourceRange, String) (File SourceRange))
-parseText fnm txt loader = runParser $ parse fnm txt loader
-
-parse :: Text -- ^ File name
-      -> Text -- ^ Text of the program/module
-      -> (Text -> Parser (Package SourceRange))
-      -- ^ A resolver/loader function for imported modules
-      -> Parser (File SourceRange)
-parse fnm txt loader = (liftHappy $ file $ lexer $ initialInput fnm txt)
-               >>= (\f@(File rng _ pname _ _) -> return $ Package rng pname (f :| []))
-               >>= transformBiM loadImport
-               >>= postprocess
-               >>= (\(Package _ _ (f :| [])) -> return f)
-  where loadImport :: ImportSpec SourceRange -> Parser (ImportSpec SourceRange)
-        loadImport is@(Import _ _ path) = resolveImport path loader >> return is
-
-liftHappy :: Either (SourceRange, String) (a SourceRange)
-          -> Parser (a SourceRange)
-liftHappy = either throwError return
-
--- | 1) Collect standard library identifiers
---   2) Collect binding information from imports
---   3) Collect local top-level bindings
---   4) Traverse scopes (function bodies, blocks) gathering local
---   binding information and resolve program identifiers as types or
---   variables/constants/functions.
---   6) Check that all names are in the right contexts: e.g. no type
---   names are used as expressions and vice-versa.
---
---   Top-down rewriting as we need to see the context.
-
--- | Infer identifier bindings, types of variables and expressions and
--- disambiguate expressions
--- postprocess :: Package SourceRange -> Parser (Package SourceRange)
--- postprocess = annotateBindings >=> disambiguate
-
---   Based on the semantics of identifiers (in annotations) rewrite expressions:
---      * FieldSelector with the object part that is a Name. Check if
---        that Name is a package name. If so, this expression can
---        be a QualifiedName.
---      * CallExpr with either:
---        - the length of the arguments list is 1 and the first
---          argument is not a type. Check if the function part is a
---          name which is a named type, or a Name with a qualifier that
---          referse to a type. If so, this is a type conversion.
---        - the first argument is a Name
---          (disambiguated per rule 1). If so, that argument can be a
---          named type instead
---   Note: this just looks at the top level node, so should be called
---   from a function that does a recursive traversal.
-disambiguate :: Expression SourceRange -> Parser (Expression SourceRange)
-disambiguate e = case e of
-  FieldSelector a (Name _na Nothing ident) fident@(Id _ _ fname) ->
-    case ident of
-      Id _ bind pname -> case bind^.bindingKind of
-        PackageB _ pexports ->
-          if HM.member fname pexports then return $ Name a (Just ident) fident
-          else unexpected fident $ "Identifier " ++ (T.unpack fname) ++ " not exported from package " ++ (T.unpack pname)
-        _                   -> return e
-      BlankId {}  -> unexpected ident "Reading from a blank identifier"
-  CallExpr a fn mtype args mspread ->
-       do -- 1. disambiguate arguments to see if the first argument is
-          -- actually a type
-          (mtype', args') <- case args of
-            (arg:rest) -> case arg of
-              Name _ mqual ident ->
-                do (mtype'', mexp) <- disambiguateFirstTypeParam mtype mqual ident
-                   return (mtype'', (maybeToList mexp) ++ rest)
-              _                  -> return (mtype, args)
-            [] -> return (mtype, args)
-          let call' = CallExpr a fn mtype' args' mspread
-          -- 2. Disambiguate the call expression from a type conversion.
-          case fn of
-            Name rng mqual ident ->
-              if isType ident && -- the function part is actually a type
-                 isNothing mtype && -- the first argument is not a type
-                 length args == 1 && -- there is exactly one argument
-                 isNothing mspread -- there is no spread argument
-              then
-                -- trace ("\n\nrng: " ++ show rng) $
-                -- trace ("mqual: " ++ show mqual) $
-                -- trace ("ident: " ++ show ident) $
-                -- trace ("mtype: " ++ show mtype) $
-                -- trace ("args: " ++ show args ++ "\n\n") $
-                return $ pos (rng, head args) Conversion 
-                (NamedType rng $ TypeName rng mqual ident)
-                (head args)
-              else return call'
-            _ -> return call'
-  _ -> return e
-
-disambiguateFirstTypeParam :: Maybe (Type SourceRange)
-                           -> Maybe (Id SourceRange)
-                           -> Id (SourceRange)
-                           -> Parser (Maybe (Type SourceRange), Maybe (Expression SourceRange))
-disambiguateFirstTypeParam mtype mqual ident =
-  if isType ident then
-    case mtype of
-      Just _ -> unexpected ident "More than one type parameter to a function call"
-      Nothing -> return (Just $ pos (mqual, ident) NamedType $ pos (mqual, ident) TypeName mqual ident, Nothing)
-  else return (mtype, Just $ pos (mqual, ident) Name mqual ident)
-
-isType :: Id a -> Bool
-isType (Id _ bind _) = case bind^.bindingKind of
-  TypeB _ -> True
-  _       -> False
-    
--- 1) The scope of a predeclared identifier is the universe block.
--- 2) The scope of an identifier denoting a constant, type, variable,
--- or function (but not method) declared at top level (outside any
--- function) is the package block.
--- 3) The scope of the package name of an imported package is the file
--- block of the file containing the import declaration.
--- 4) The scope of an identifier denoting a method receiver, function
--- parameter, or result variable is the function body.
--- 5) The scope of a constant or variable identifier declared inside a
--- function begins at the end of the ConstSpec or VarSpec
--- (ShortVarDecl for short variable declarations) and ends at the end
--- of the innermost containing block.
--- 6) The scope of a type identifier declared inside a function begins
--- at the identifier in the TypeSpec and ends at the end of the
--- innermost containing block.
-
-class Postprocess a where
-  -- | Postprocess the AST:
-  -- 1. Collect the bindings from `a` in the current scope and modify
-  -- binding annotations on identifiers to reflect the kind of the
-  -- binding and the relevant type.
-  -- 2. Disambiguate expressions.
-  -- 3. Infer/check types
-  postprocess :: a -> Parser a
-
--- | This is the second
-instance Postprocess (Package SourceRange) where
-  postprocess pkg@(Package a pname _files) =
-    do -- 1. Initialize scope with the predefined type/var bindings
-       identifiers .= defaultBindings
-       -- 2. with a new scope, for each file
-       newScope $ do
-         -- 3. Analyse the bindings due to top-level declarations and
-         -- make a map of imported bindings for each file.
-         (annotatedFiles, topLevelBinds, importBindMap) <- topLevelBindings pkg
-         -- 4. Traverse and postprocess each file
-         (Package a pname) <$> mapM (postprocessFile topLevelBinds importBindMap) annotatedFiles
-
--- | Annotates and returns the top-level bindings (top-level
--- declarations and map of imported bindings for each file) for a
--- given package
-topLevelBindings :: Package SourceRange
-                 -> Parser (NonEmpty (File SourceRange), Scope, HashMap Text Scope)
-topLevelBindings (Package _ _ files) =
-  let processFile :: File SourceRange
-                  -> Parser (File SourceRange, Scope, Scope)
-      processFile f =
-        do (f', tops, imps) <- annotateAndCollectFileTopLevelBindings f
-           return (f', tops, imps)
-      mergeScopes :: (Scope, HashMap Text Scope)
-                   -> (File SourceRange, Scope, Scope)
-                   -> (Scope, HashMap Text Scope)
-      mergeScopes (curTops, curImpMap) (curFile, tops, imps) =
-        (HM.union curTops tops, HM.insert (fileName curFile) imps curImpMap)
-  in  do xs <- mapM processFile files
-         let files' = NE.map (\(f, _, _) -> f) xs
-         let (topLevelScope, importScopes) =
-               foldl mergeScopes (emptyScope, HM.empty) xs
-         return (files', topLevelScope, importScopes)
-
--- | Annotates and returns the bindings for this file's imports and
--- its top-level declarations.
-annotateAndCollectFileTopLevelBindings :: File SourceRange
-                                       -> Parser (File SourceRange, Scope, Scope)
-annotateAndCollectFileTopLevelBindings (File rng name pname imports tops)  =
-  bracketScope $ do
-     -- 1. Get bindings to current file imports and annotate the
-     -- relevant AST subtrees
-     (importBinds, imports') <- liftM ((HM.unions *** id) . unzip) $ mapM processImports imports
-     -- and bring them into scope
-     (topLevelBinds, tops') <- pushScopeMod importBinds $
-          -- 2. Get the top-level bindings
-          newScope $ liftM ((HM.unions *** id) . unzip) $ mapM topLevelBinding tops
-     return (File rng name pname imports' tops', topLevelBinds, importBinds)
-
--- | Bring top-level bindings for the file in scope, then postprocess the file
-postprocessFile :: Scope -> HashMap Text Scope -> File SourceRange -> Parser (File SourceRange)
-postprocessFile topLevelDecls importsMap (File a fname pname imports topLevels) =
-  pushScopeMod (HM.lookupDefault HM.empty fname importsMap) $
-  pushScopeMod topLevelDecls $
-  (File a fname pname imports) <$> mapM postprocessFunctions topLevels
-
--- | Returns the top-level bindings corresponding to a top-level
--- declaration, while annotating the identifiers with the bindings as
--- well.
-topLevelBinding :: TopLevel SourceRange -> Parser (Scope, TopLevel SourceRange)
-topLevelBinding top = case top of
-  FunctionDecl a (Id rng _ fname) params returns mbody ->
-    do params' <- postprocess params
-       ptypes <- getParamTypes params'
-       mstype <- getSpreadType params'
-       returns' <- postprocess returns
-       rtypes <- getReturnTypes returns'
-       let ftype = Function Nothing ptypes mstype rtypes
-       let binding = mkBinding rng $ VarB ftype
-       scope <- mkScopeM [(fname, binding)]
-       return (scope, FunctionDecl a (Id rng binding fname) params' returns' mbody)
-  MethodDecl   a recv (Id rng _ mname) params returns mbody ->
-    do params' <- postprocess params
-       ptypes <- getParamTypes params'
-       mstype <- getSpreadType params'
-       returns' <- postprocess returns
-       rtypes <- getReturnTypes returns'
-       recv' <- postprocess recv
-       rtype  <- getReceiverType recv'
-       let mtype = Function (Just rtype) ptypes mstype rtypes
-       let binding = mkBinding rng $ VarB mtype
-       scope <- mkScopeM [(mname, binding)]
-       return (scope, MethodDecl a recv' (Id rng binding mname) params' returns' mbody)
-       -- ^ TODO: add this binding to the method set of the receiver
-  TopDecl a decl -> do
-    liftM (second (TopDecl a) . swap) $ withScopeDiff $ postprocess decl
-  _ -> unexpected top "Function and method declarations cannot be declared with an empty identifier"
-
--- | Build a scope from a list of binding names, locations and
--- kinds. If any of names are duplicated, raise an error.
-mkScopeM :: [(Text, Binding)] -> Parser Scope
-mkScopeM = foldM insBind emptyScope
-  where insBind scope (bn, bind) =
-          do when (bn `HM.member` scope) $ unexpected (getRange bind) $ "Duplicate binding for " ++ (unpack bn)
-             return $ HM.insert bn bind scope
-
-swap :: (a, b) -> (b, a)
-swap (a, b) = (b, a)
-
--- | Returns the name of an identifier. Fails with an error if it's blank
--- getIdName :: Id SourceRange -> Parser Text
--- getIdName i = case i of
---   Id _a _ name -> return name
---   BlankId rng -> unexpected rng "Identifier cannot be blank"
-
--- | Annotates and returns the imported bindings for a given import declaration
-processImports :: ImportDecl SourceRange -> Parser (Scope, ImportDecl SourceRange)
-processImports (ImportDecl rng ispecs) =
-  bracketScope $ liftM ((HM.unions *** (ImportDecl rng)) . unzip) $ mapM getImportsS ispecs
-  where getImportsS :: ImportSpec SourceRange -> Parser (Scope, ImportSpec SourceRange)
-        getImportsS i@(Import _ _itype path) =
-          lookupImport path >>=
-          \case Nothing -> unexpected (i^.ann) $ "Could not find the source for the package \"" ++ show path ++ "\""
-                Just pack@(Package _ _ _) ->
-                  do exports <- newScope $ postprocess pack >> getCurrentBindings
-                     -- Question: why the breakdown here?  Is there anything required beyond just filtering for
-                     -- exported names?
-                     return (HM.filterWithKey isExported exports, i)
-
---                     let (package, global) = undefined -- HM.foldlWithKey' makeImportBindings (emptyBindings, emptyBindings) exports
-
--- exportBindingTransform :: (Text, Binding) -> (Text, Binding)
--- exportBindingTransform (n, bind) =
---                      case (itype, bind) of
---                        (ImportAll, _) -> (n, bind.bindingImported .~ True)
---                        -- Field names are never imported with qualifiers
---                        (ImportQualified mpiname, Binding {_bindingKind = FieldOrMethodB _}) -> (n, bind.bindingImported .~ True)
---                        (ImportQualified mpiname, _)->
---                         (ImportedQualifiedB (fromMaybe pname mpiname) n, kr)
--- An identifier is exported iff:
--- 1) the first character of the identifier's name is a Unicode upper
--- case letter (Unicode class "Lu"); and
--- 2) the identifier is declared in the package block or it is a field
--- name or method name.
-isExported :: Text -> Binding -> Bool
-isExported n bind | not (bind^.bindingImported) = generalCategory (T.head n) == UppercaseLetter
-isExported _ _                                  = False
-  
-topLevelNames :: Package SourceRange -> Parser Bindings
-topLevelNames (Package _ _ _) = undefined
-  -- do mapM postprocess decls
-  --    getCurrentBindings
-
-  -- filterExported
---  An identifier may be exported to permit access to it from another package. An identifier is exported if both:
-
--- All other identifiers are not exported.
--- Each package has a package block containing all Go source text for that package.
-
-makeImportBindings :: (Bindings, Bindings) -> Text -> Binding -> (Bindings, Bindings)
-makeImportBindings = undefined
-
--- | Evaluate a parser, returning the result, and the difference in
--- bindings in the tip of the bindings scope before and after the
--- evaluation.
-withScopeDiff :: Parser a -> Parser (a, Scope)
-withScopeDiff p = do s <- getCurrentBindings
-                     a <- p
-                     s' <- getCurrentBindings
-                     return (a, HM.difference s' s)
-
-postprocessFunctions :: TopLevel SourceRange
-                     -> Parser (TopLevel SourceRange)
-postprocessFunctions tl = case tl of
-  FunctionDecl a name params returns mbody -> newScope $
-    do params' <- postprocess params
-       returns' <- postprocess returns
-       liftM (FunctionDecl a name params' returns') $
-         sequence $ fmap (mapM postprocess) mbody
-  MethodDecl a recv name params returns mbody -> newScope $
-    do recv' <- postprocess recv
-       params' <- postprocess params
-       returns' <- postprocess returns
-       liftM (MethodDecl a recv' name params' returns') $
-         sequence $ fmap (mapM postprocess) mbody
-       -- we have already analysed and recorded bindings from
-       -- declarations in `collectTopLevelBindings` and there are no
-       -- nested binding scopes in them, so we skip top declarations.
-  TopDecl {} -> return tl
-
-instance Postprocess (ParameterList SourceRange) where
-  postprocess pl = case pl of
-    NamedParameterList a nps mrestp -> NamedParameterList a <$> postprocess nps <*> postprocess mrestp
-    AnonymousParameterList a aps mrestp -> AnonymousParameterList a <$> postprocess aps <*> postprocess mrestp
-
-instance Postprocess (NamedParameter SourceRange) where
-  postprocess (NamedParameter a ident ty) =
-    do ty' <- postprocess ty
-       tyt <- getType ty'
-       i' <- declareBindingIdM ident (VarB tyt)
-       return $ NamedParameter a i' ty'
-
-instance Postprocess (ReturnList SourceRange) where
-  postprocess rl = case rl of
-    NamedReturnList a nps  -> NamedReturnList a <$> postprocess nps
-    AnonymousReturnList a aps -> AnonymousReturnList a <$> postprocess aps
-
-instance Postprocess (TopLevel SourceRange) where
-  postprocess tl = case tl of
-    FunctionDecl a fname params returns body ->
-      do (params', returns') <- newScope $ liftM2 (,) (postprocess params) (postprocess returns)
-         bk <- VarB <$> (Function Nothing <$> getParamTypes params' <*> getSpreadType params' <*> getReturnTypes returns')
-         fname' <- declareBindingIdM fname bk
-         return (FunctionDecl a fname' params' returns' body)
-    MethodDecl  a recv mname params returns body ->
-      do (params', returns', recv') <- newScope $ liftM3 (,,) (postprocess params) (postprocess returns) (postprocess recv)
-         bk <- VarB <$> (Function <$> (Just <$> getType recv') <*> getParamTypes params' <*> getSpreadType params' <*> getReturnTypes returns')
-         mname' <- declareBindingIdM mname bk
-         return (MethodDecl a recv' mname' params' returns' body)
-    TopDecl a decl -> TopDecl a <$> postprocess decl
-
-instance Postprocess (Declaration SourceRange) where
-  postprocess decl = case decl of
-    TypeDecl a tspecs -> TypeDecl a <$> mapM postprocess tspecs
-    VarDecl a vspecs -> VarDecl a <$> mapM postprocess vspecs
-    ConstDecl a cspecs -> ConstDecl a <$> mapM postprocess cspecs
-
-instance Postprocess (TypeSpec SourceRange) where
-  postprocess (TypeSpec a tid typ) = TypeSpec a <$>
-   (TypeB <$> getType typ >>= declareBindingIdM tid) <*> return typ
-
-instance Postprocess (VarSpec SourceRange) where
-  postprocess vs = case vs of
-    TypedVarSpec a idents ty inits ->
-      do ty' <- postprocess ty
-         idents' <- mapM (\ident -> (VarB <$> getType ty') >>= declareBindingIdM ident) idents
-         inits' <- postprocess inits
-         return $ TypedVarSpec a idents' ty' inits'
-         -- ^ TODO check that the inferred types of inits are compatible with ty
-    UntypedVarSpec a idents inits ->
-      if NE.length idents == NE.length inits then
-        do inits' <- mapM postprocess inits
-           idents' <- mapM (\(ident, init) ->
-                              VarB <$> getType init >>= declareBindingIdM ident) $ NE.zip idents inits'
-           return (UntypedVarSpec a idents' inits')
-      else unexpected a "The number of initializers does not match the number of variables being declared"
-
-instance Postprocess (ConstSpec SourceRange) where
-  -- TODO: we need to know the context (type) of the previous const specs here
-  postprocess (ConstSpec _a _idents mrhs) =
-    case mrhs of
-      Nothing -> undefined
-      Just _ -> undefined
-
--- | Note that fields don't introduce names into the global namespace, so we
--- don't modify that global environment here.  We *do* have to traverse the
--- types embedded in field decls to update them with binding information.
-instance Postprocess (FieldDecl SourceRange) where
-  postprocess decl =
-    case decl of
-      NamedFieldDecl a ids ty mtag ->
-        NamedFieldDecl a ids <$> postprocess ty <*> pure mtag
-      AnonymousFieldDecl a tname mtag ->
-        AnonymousFieldDecl a <$> postprocess tname <*> pure mtag
-
-instance Postprocess (Statement SourceRange) where
-  postprocess s = case s of
-    ShortVarDeclStmt a idents inits ->
-      do mbks <- mapM lookupBindingIdM $ NE.filter nonBlankId idents
-         let atLeastOneNew = any isNothing mbks
-         unless atLeastOneNew $ unexpected s "Short variable declaration that doesn't declare new variables"
-         unless (NE.length idents == NE.length inits) $ unexpected s "The number of initializers doesn't match the number of variable declared"
-         inits' <- mapM postprocess inits
-         idents' <- mapM (\(ident, initEx) -> do
-                            VarB <$> getType initEx >>= declareBindingIdM ident) $ NE.zip idents inits'
-         return (ShortVarDeclStmt a idents' inits')
-    BlockStmt a stmts -> newScope (BlockStmt a <$> postprocess stmts)
-    IfStmt a mguard e then_ else_ -> newScope $ do
-      mguard' <- mapM postprocess mguard
-      e' <- postprocess e
-      then_' <- newScope (mapM postprocess then_)
-      else_' <- newScope (mapM postprocess else_)
-      return (IfStmt a mguard' e' then_' else_')
-    ForStmt a fc body ->
-      case fc of
-        ForClause a' mguard mexp minc -> newScope $ do
-          fc' <- ForClause a' <$> mapM postprocess mguard <*> mapM postprocess mexp <*> mapM postprocess minc
-          ForStmt a fc' <$> mapM postprocess body
-        ForRange a' aord e -> do
-          fc' <- ForRange a' <$> postprocess aord <*> postprocess e
-          ForStmt a fc' <$> newScope (mapM postprocess body)
-    LabeledStmt a l ls -> LabeledStmt a l <$> postprocess ls
-    AssignStmt a lhs op rhs -> AssignStmt a <$> mapM postprocess lhs <*> pure op <*> mapM postprocess rhs
-    DeclStmt a d -> DeclStmt a <$> postprocess d
-    ExpressionStmt a e -> ExpressionStmt a <$> postprocess e
-    SendStmt a c v -> SendStmt a <$> postprocess c <*> postprocess v
-    UnaryAssignStmt a e incdec -> UnaryAssignStmt a <$> postprocess e <*> pure incdec
-    GoStmt a e -> GoStmt a <$> postprocess e
-    ReturnStmt a es -> ReturnStmt a <$> mapM postprocess es
-    DeferStmt a e -> DeferStmt a <$> postprocess e
-    BreakStmt {} -> pure s
-    ContinueStmt {} -> pure s
-    FallthroughStmt {} -> pure s
-    EmptyStmt {} -> pure s
-    GotoStmt {} -> pure s
-
-nonBlankId :: Id a -> Bool
-nonBlankId i = case i of
-  Id {} -> True
-  BlankId _ -> False
-
-instance Postprocess (Expression SourceRange) where
-  postprocess e =
-    let mpp = case e of
-          FunctionLit {} -> error "unsupported expression"
-          CompositeLit a ty els -> CompositeLit a <$> postprocess ty <*> mapM postprocess els
-          MethodExpr a recv ident -> MethodExpr a <$> postprocess recv <*> postprocess ident
-          CallExpr a fne mty args mvariadic -> CallExpr a <$> postprocess fne <*> postprocess mty <*> mapM postprocess args <*> sequence (postprocess <$> mvariadic)
-          Name a mqualifier ident -> Name a <$> postprocess mqualifier <*> postprocess ident
-          -- ^ TODO Check if ident is bound to a var or const. Check
-          -- that qualifier is bound to a package name and ident is
-          -- bound to a var or const exported from it
-          BinaryExpr a op left right -> BinaryExpr a op <$> postprocess left <*> postprocess right
-          UnaryExpr a op ue -> UnaryExpr a op <$> postprocess ue
-          Conversion a ty ce -> Conversion a <$> postprocess ty <*> postprocess ce
-          FieldSelector a se fname -> FieldSelector a <$> postprocess se <*> postprocess fname
-          IndexExpr a base index -> IndexExpr a <$> postprocess base <*> postprocess index
-          SliceExpr a base me1 me2 me3 -> SliceExpr a <$> postprocess base <*> postprocess me1 <*> postprocess me2 <*> postprocess me3
-          TypeAssertion a ae ty -> TypeAssertion a <$> postprocess ae <*> postprocess ty
-          _ -> return e
-    in  mpp >>= disambiguate
-
-instance Postprocess (AssignOrDecl SourceRange) where
-  postprocess aord =
-    case aord of
-      AODNone -> pure AODNone
-      Decl ids -> Decl <$> mapM postprocess ids
-      Assign es -> Assign <$> mapM postprocess es
-
-instance Postprocess a => Postprocess (Maybe a) where
-  postprocess = sequence . fmap postprocess
-
-instance Postprocess a => Postprocess [a] where
-  postprocess = mapM postprocess
-
-instance Postprocess (ExprClause SourceRange) where
-  postprocess = error "Switch statements are not supported"
-
-instance Postprocess (TypeClause SourceRange) where
-  postprocess = error "Switch statements are not supported"
-
-instance Postprocess (CommClause SourceRange) where
-  postprocess = error "Select statements are not supported"
-
-instance Postprocess (Type SourceRange) where
-  postprocess t =
-    case t of
-      NamedType a tn -> NamedType a <$> postprocess tn
-      ArrayType a me et -> ArrayType a <$> mapM postprocess me <*> postprocess et
-      PointerType a pt -> PointerType a <$> postprocess pt
-      SliceType a st -> SliceType a <$> postprocess st
-      MapType a t1 t2 -> MapType a <$> postprocess t1 <*> postprocess t2
-      ChannelType a cd et -> ChannelType a cd <$> postprocess et
-      FunctionType a params rets ->
-        FunctionType a <$> postprocess params <*> postprocess rets
-
-instance Postprocess (Id SourceRange) where
-  postprocess i = case i of
-    Id rng _ name -> Id rng <$> (getBinding name rng) <*> pure name
-    BlankId _     -> return i
-
-instance Postprocess (TypeName SourceRange) where
-  postprocess (TypeName a mpid tid) = TypeName a <$> mapM postprocess mpid <*> postprocess tid
-
-instance Postprocess (Receiver SourceRange) where
-  postprocess = undefined
-
-instance Postprocess (Element SourceRange) where
-  postprocess e =
-    case e of
-      Element a elEx -> Element a <$> postprocess elEx
-      KeyedEl a k elEx -> KeyedEl a <$> postprocess k <*> postprocess elEx
-
-instance Postprocess (Key SourceRange) where
-  postprocess k =
-    case k of
-      FieldKey a fk -> FieldKey a <$> postprocess fk
-      ExprKey a ek -> ExprKey a <$> postprocess ek
-
--- | Declare a binding, checking whether it was already declared in
--- this scope, and also recording it in the identifire. If the check
--- fails, an appropriate error with a provided source range will be
--- thrown.
-declareBindingIdM :: Id SourceRange -> BindingKind -> Parser (Id SourceRange)
-declareBindingIdM (Id rng _ ident) bk =
-  let bind = mkBinding rng bk in
-  declareBindingM ident bind >> return (Id rng bind ident)
-declareBindingIdM ident@(BlankId _)    _  = return ident
-
-
-declareBindingM :: Text -> Binding -> Parser ()
-declareBindingM name b =
-  do mbind <- uses identifiers (HM.lookup name . fst . NE.uncons)
-     case mbind of
-       Just prev -> if prev^.bindingThisScope then
-                      unexpected (b^.bindingDeclLoc) $ "Duplicate declaration for " ++
-                      show name ++ ". Previous declaration at " ++
-                      show (prev^.bindingDeclLoc)
-                    else identifiers %= declareBinding name b
-       Nothing -> identifiers %= declareBinding name b
-
--- | Look up the binding kind of an identifier. If the identifier is
--- not found, fail with an error.
-getBindingKind :: Text -> SourceRange -> Parser BindingKind
-getBindingKind name rng = view bindingKind <$> getBinding name rng
-
-getBinding :: Text -> SourceRange -> Parser Binding
-getBinding name rng =
-  uses identifiers (lookupBinding name) >>=
-  \case Just b -> return b
-        Nothing -> unexpected rng $ "Unknown identifier " ++ show name
-
-        
-
-lookupBindingIdM :: Id a -> Parser (Maybe BindingKind)
-lookupBindingIdM (Id _ _ name) = do b <- uses identifiers $ lookupBinding name
-                                    return $ fmap (view bindingKind) b
-lookupBindingIdM (BlankId _) = return Nothing
-        
--- | Push a fresh binding context and evaluate the parser in it. Pops
--- the context afterwards.
-newScope :: Parser a -> Parser a
-newScope p = do identifiers %= pushScope
-                rp <- p
-                identifiers %= fromJust . popScope
-                return rp
-                
--- | remember the state of the top level scope, execute a parser, and
--- restore the remembered state
-bracketScope :: Parser a -> Parser a
-bracketScope p = do lexenv <- use identifiers
-                    rp <- p
-                    identifiers .= lexenv
-                    return rp
-                    
--- | Push a new scope in current lexenv, merge the given scope into it, and execute the parser in the new lexenv
-pushScopeMod :: Scope -> Parser a -> Parser a
-pushScopeMod s p = newScope $ modifyInnerScope (`HM.union` s) >> p 
-
--- | Returns the tip of bindings stack
-getCurrentBindings :: Parser Scope
-getCurrentBindings = uses identifiers NE.head
-
--- | Modify just the inner scope
-modifyInnerScope :: (Scope -> Scope) -> Parser ()
-modifyInnerScope f = do (top :| rest) <- use identifiers
-                        identifiers .= (f top :| rest)
-
--- | Deletes all information about current bindings
--- clearBindings :: Parser ()
--- clearBindings = identifiers .= []
-
-resolveImport :: Text -> (Text -> Parser (Package SourceRange)) -> Parser (Package SourceRange)
-resolveImport path loader = uses modules (HM.lookup path) >>=
-  \case (Just p) -> return p
-        Nothing  -> do pgm <- loader path
-                       lift $ zoom modules $ modify (HM.insert path pgm)
-                       return pgm
-
-lookupImport :: Text -> Parser (Maybe (Package SourceRange))
-lookupImport path = liftM (HM.lookup path) $ use modules
-
--- Default module loading (mimicking the behaviour of the official
--- implementation):
--- 1) The package to be loaded is located in a directory $GOPATH/<importpath>/
--- 2) Parse all the go source files in the package directory
---    (e.g. with file names of the format *.go)
--- 3) Make sure these files have the same package name (throw an error otherwise)
--- 4) Parse each file in sequence and catenate them 
-defaultPackageLoader :: FilePath -> Parser (Package SourceRange)
-defaultPackageLoader path = ExceptT $ lift $ loader
-  where loader :: IO (Either (SourceRange, String) (Package SourceRange))
-        loader = lookupEnv "GOPATH" >>=
-          \case Nothing     -> return $ Left (fakeRange, "GOPATH environment variable is not declared. Can't load modules without it.")
-                Just gopath -> let modulePath = gopath </> path
-                               in  liftM (bimap (fakeRange,) id) $ parsePackage modulePath
-                 
--- | Parse a file using the default imported module loader.
-parseFile :: FilePath -> IO (Either String (File SourceRange))
-parseFile fp = do
-  moduleText <- liftIO $ readFile fp
-  liftM (bimap (\err -> "Parse error at " ++ show (fst err) ++ ": " ++ snd err) id) $
-    parseText (T.pack $ takeFileName fp) moduleText (defaultPackageLoader . unpack)
-
--- | Parse a module using the default module loader. The first
--- argument is the directory path that contains the module source
--- files. It is an absolute path, e.g. not relative to the 'GOPATH'
--- environment variable.
-parsePackage :: FilePath -> IO (Either String (Package SourceRange))
-parsePackage path = -- TODO: catch the exceptions from IO functions
-                    -- and convert them to ExceptT error messages for
-                    -- uniform interface
-  listDirectory path >>= \files ->
-  let mgoFiles = nonEmpty $ filter ((==) ".go" . takeExtensions) files
-  in runExceptT $ case mgoFiles of
-       Nothing -> throwError $ "Can't load the module in " ++ path ++ " as it does not have any Go source files."
-       Just goFiles -> do (file :| rest) <- mapM (ExceptT . parseFile) goFiles
-                          let (File _ _ pname _ _) = file
-                          return $ Package fakeRange pname (file :| rest)
+import           Data.Text
+
+-- import           Debug.Trace (trace)
+
+import           Language.Go.AST
+import           Language.Go.Rec
+import           Language.Go.Types as T
+
+data SourcePos =
+  SourcePos { pos_filename :: Text
+            , pos_column :: Int
+            , pos_line :: Int
+            , pos_offset :: Int
+            }
+  deriving (Eq, Show)
+
+noPos :: SourcePos
+noPos = SourcePos { pos_filename = ""
+                  , pos_column = 0
+                  , pos_line = 0
+                  , pos_offset = 0
+                  }
+
+-- | Type synonym for a single unfolding of the Node type. It's easier
+-- to define FromJSON instances for this and then derive the
+-- corresponding instance for Node automatically.
+type N (i :: NodeType) = NodeF SourcePos (Fix (NodeF SourcePos)) i
+
+instance FromJSON SourcePos where
+  parseJSON = withObject "SourcePos" $ \v -> SourcePos <$>
+    v .: "filename" <*> v .: "column" <*> v .: "line" <*> v .: "offset"
+
+instance FromJSON (N i) => FromJSON (Node SourcePos i) where
+  parseJSON x = In <$> parseJSON x
+
+instance FromJSON (N Main) where
+  parseJSON = withObject "Main" $ \v ->
+    MainNode <$> v .: "name" <*> v .: "package" <*> v .: "imports"
+
+instance FromJSON (N Package) where
+  parseJSON = withObject "Package" $ \v ->
+    PackageNode <$> v .: "name" <*> v .: "path" <*>
+    v .: "imports" <*> v .:? "file-paths" .!= [] <*>
+    v .: "files" <*> v .: "initializers"
+
+instance FromJSON (N File) where
+  parseJSON = withObject "File" $ \v ->
+    FileNode <$> v .: "path" <*> v .: "package-name"
+    <*> v .: "declarations" <*> v .: "imports"
+
+instance FromJSON Ident where
+  parseJSON = withObject "Ident" $ \v ->
+    Ident <$> v .: "ident-kind" <*> v .: "value"
+
+instance FromJSON T.IdentKind where
+  parseJSON = withText "IdentKind" $ \txt ->
+    case lookup txt [("Builtin", T.IdentBuiltin), ("Const", T.IdentConst),
+                     ("Func", T.IdentFunc), ("Label", T.IdentLabel),
+                     ("Nil", T.IdentNil), ("PkgName", T.IdentPkgName),
+                     ("TypeName", T.IdentTypeName), ("Var", T.IdentVar),
+                     ("NoKind", T.IdentNoKind)] of
+      Just k -> return k
+      Nothing ->
+        fail $ "FromJSON IdentKind: unknown identifer kind " ++ show txt
+
+instance FromJSON (N Decl) where
+  parseJSON = withObject "Decl" $ \v -> do
+    tp <- v .: "type"
+    pos <- v .: "position"
+    case tp :: Text of
+      x | x `elem` ["function", "method"] ->
+            FuncDecl pos <$> v .:? "receiver" <*> v .: "name"
+            <*> v .: "params" <*> v .:? "variadic" <*> v .:? "results" .!= []
+            <*> v .:? "body"
+      "type-alias" -> TypeAliasDecl pos <$> v .: "binds"
+      _ -> GenDecl pos <$> v .: "specs"
+
+
+instance FromJSON (N Bind) where
+  parseJSON = withObject "Binding" $ \v ->
+    Binding <$> v .: "name" <*> v .: "value"
+
+instance FromJSON (N Field) where
+  parseJSON = withObject "Field" $ \v -> FieldNode <$>
+    v .:? "names" .!= [] <*> v .: "declared-type" <*> v .:? "tag"
+
+instance FromJSON BasicLit where
+  parseJSON = withObject "BasicLit" $ \v ->
+    BasicLit <$> v .: "type" <*> v .: "value"
+
+instance FromJSON BasicLitType where
+  parseJSON = withText "BasicLitType" $ \txt ->
+    case lookup txt [("BOOL", LiteralBool), ("INT", LiteralInt),
+                     ("FLOAT", LiteralFloat), ("COMPLEX", LiteralComplex),
+                     ("IMAG", LiteralImag), ("CHAR", LiteralChar),
+                     ("STRING", LiteralString)] of
+      Just tp -> return tp
+      _ -> fail $ "FromJSON BasicLitType: unknown basic literal type " ++ show txt
+
+instance FromJSON BasicConst where
+  parseJSON = withObject "BasicConst" $ \v -> do
+    exprType <- v .: "type"
+    case exprType :: Text of
+      "BOOL" -> BasicConstBool . readBool <$> v .: "value"
+      "STRING" -> BasicConstString <$> v .: "value"
+      "INT" -> BasicConstInt . read <$> v .: "value"
+      "FLOAT" -> BasicConstFloat <$> v .: "numerator" <*> v .: "denominator"
+      "COMPLEX" -> BasicConstFloat <$> v .: "real" <*> v .: "imaginary"
+      _t -> fail $ "FromJSON BasicConst: unknown constant type: " ++ show exprType
+
+instance FromJSON ChanDir where
+  parseJSON = withText "ChanDir" $ \txt -> case txt of
+    "send" -> return ChanDirSend
+    "recv" -> return ChanDirRecv
+    "both" -> return ChanDirBoth
+    _ -> fail $ "FromJSON ChanDir: unknown channel direction " ++ show txt
+
+instance FromJSON (N Expr) where
+  parseJSON = withObject "Expr" $ \v -> do
+    exprKind <- v .: "kind"
+    pos <- v .:? "position" .!= noPos
+    go_tp <- v .:? "go-type" .!= T.NoType
+    case exprKind :: Text of
+      "type" -> do
+        exprType <- v .: "type"
+        case exprType :: Text of
+          tp | tp `elem` ["slice", "array"] ->
+               ArrayTypeExpr pos go_tp <$> v .:? "length" <*> v .: "element"
+          "pointer" -> PointerTypeExpr pos go_tp <$> v .: "contained"
+          "interface" ->
+            InterfaceTypeExpr pos go_tp <$> v .: "methods" <*> v .: "incomplete"
+          "map" -> MapTypeExpr pos go_tp <$> v .: "key" <*> v .: "value"
+          "chan" -> ChanTypeExpr pos go_tp <$> v .: "direction" <*> v .: "value"
+          "struct" -> StructTypeExpr pos go_tp <$> v .: "fields"
+          "function" -> FuncTypeExpr pos go_tp <$> v .: "params" <*>
+                        v .:? "variadic" <*> v .:? "results" .!= []
+          "ellipsis" -> EllipsisExpr pos go_tp <$> v .:? "value"
+          "identifier" -> IdentExpr pos go_tp <$> v .:? "qualifier" <*> v .: "value"
+          _ -> fail $ "FromJSON Expr: unknown expression of kind 'type': "
+               ++ show exprType
+      "literal" -> do
+        exprType <- v .: "type"
+        case exprType :: Text of
+          "function" -> FuncLitExpr pos go_tp <$> v .: "params" <*>
+                        v .:? "results" .!= [] <*> v .: "body"
+          "composite" ->
+            CompositeLitExpr pos go_tp <$> v .:? "declared" <*> v .: "values"
+          _ -> BasicLitExpr pos go_tp <$> parseJSON (Object v)
+      "constant" -> BasicConstExpr pos go_tp <$> v .: "value"
+      "expression" -> do
+        exprType <- v .: "type"
+        case exprType :: Text of
+          "index" -> IndexExpr pos go_tp <$> v .: "target" <*> v .: "index"
+          "star" -> StarExpr pos go_tp <$> v .: "target"
+          "call" -> CallExpr pos go_tp <$> v .: "function" <*> v .: "arguments"
+          "cast" -> CastExpr pos go_tp <$> v .: "target" <*> v .: "coerced-to"
+          -- Special cases for 'make' and 'new' builtins
+          "make" -> do
+            type_arg <- v .: "argument"
+            rest_args <- v .: "rest"
+            -- TODO: need to infer the type of the 'make' identifier?
+            return $ CallExpr pos go_tp
+              (In $ IdentExpr pos T.NoType Nothing $ Ident T.IdentFunc "make") $
+              type_arg : rest_args
+          "new" -> do
+            -- TODO: need to infer the type of the 'new' identifier?
+            type_arg <- v .: "argument"
+            return $ CallExpr pos go_tp
+              (In $ IdentExpr pos T.NoType Nothing $
+                Ident T.IdentFunc "new") [type_arg]
+          "paren" -> ParenExpr pos go_tp <$> v .: "target"
+          "selector" ->
+            SelectorExpr pos go_tp <$> v .: "target" <*> v .: "field"
+          "type-assert" ->
+            TypeAssertExpr pos go_tp <$> v .: "target" <*> v .:? "asserted"
+          "identifier" -> case HM.lookup "value" v of
+            Just (Object v') -> case HM.lookup "type" v' of
+              -- Special case for IOTA: whenever the type is "IOTA"
+              -- the value should be "IOTA" as well.
+              Just "IOTA" ->
+                return $ IdentExpr pos go_tp Nothing $ Ident T.IdentNoKind "IOTA"
+              _ -> IdentExpr pos go_tp <$> v .:? "qualifier" <*> v .: "value"
+            _ -> fail ""
+          "slice" ->
+            SliceExpr pos go_tp <$> v .: "target" <*>
+            v .: "low" <*> v .: "high" <*> v .: "max" <*> v .: "three"
+          "key-value" -> KeyValueExpr pos go_tp <$> v .: "key" <*> v .: "value"
+          "ellipsis" -> EllipsisExpr pos go_tp <$> v .:? "value"
+          "binary" -> BinaryExpr pos go_tp <$>
+                      v .: "left" <*> v .: "operator" <*> v .: "right"
+          "unary" -> UnaryExpr pos go_tp <$> v .: "operator" <*> v .: "target"
+          _ -> fail $ "FromJSON Expr: unknown expression of kind 'expression': "
+               ++ show exprType
+      _ -> fail $ "FromJSON Expr: unknown kind " ++ show exprKind
+
+instance FromJSON BinaryOp where
+  parseJSON = withText "BinaryOp" $ \txt ->
+    case lookup txt [("+", BPlus), ("-", BMinus), ("*", BMult), ("/", BDiv),
+                     ("%", BMod), ("&", BAnd), ("|", BOr), ("^", BXor),
+                     ("<<", BShiftL), (">>", BShiftR), ("&^", BAndNot),
+                     ("&&", BLAnd), ("||", BLOr), ("==", BEq), ("<", BLt),
+                     (">", BGt), ("!=", BNeq), ("<=", BLeq), (">=", BGeq)] of
+      Just op -> return op
+      _ -> fail $ "FromJSON BinaryOP: unknown binary operator " ++ show txt
+
+instance FromJSON UnaryOp where
+  parseJSON = withText "UnaryOp" $ \txt ->
+    case lookup txt [("+", UPlus), ("-", UMinus), ("!", UNot),
+                     ("^", UBitwiseNot), ("*", UStar), ("&", UAddress),
+                     ("<-", UArrow)] of
+      Just op -> return op
+      _ -> fail $ "FromJSON UnaryOp: unknown unary operator " ++ show txt
+
+instance FromJSON BranchType where
+  parseJSON = withText "BranchType" $ \txt -> case txt of
+    "break" -> return Break
+    "continue" -> return Continue
+    "goto" -> return Goto
+    "fallthrough" -> return Fallthrough
+    _ -> fail $ "FromJSON BranchType: unknown branch type " ++ show txt
+
+instance FromJSON (N Block) where
+  parseJSON o = BlockNode <$> parseJSON o
+
+instance FromJSON (N Stmt) where
+  parseJSON = withObject "Stmt" $ \v -> do
+    stmtType <- v .: "type"
+    pos <- v .:? "position" .!= noPos
+    case stmtType :: Text of
+      "return" -> ReturnStmt pos <$> v .:? "values" .!= []
+      "empty" -> return $ EmptyStmt pos
+      "expression" -> ExprStmt pos <$> v .: "value"
+      "labeled" -> LabeledStmt pos <$> v .: "label" <*> v .: "statement"
+      "branch" -> BranchStmt pos <$> v .: "type" <*> v .:? "label"
+      "range" -> RangeStmt pos <$> v .: "key" <*> v .: "value" <*>
+                 v .: "target" <*> v .: "body" <*> v .: "is-assign"
+      "declaration" -> DeclStmt pos <$> v .: "target"
+      "defer" -> DeferStmt pos <$> v .: "target"
+      "if" -> IfStmt pos <$> v .:? "init" <*>
+              v .: "condition" <*> v .: "body" <*> v .:? "else"
+      "block" -> BlockStmt pos <$> v .: "body"
+      "for" -> ForStmt pos <$> v .:? "init" <*>
+               v .:? "condition" <*> v .:? "post" <*> v .: "body"
+      "go" -> GoStmt pos <$> v .: "target"
+      "send" -> SendStmt pos <$> v .: "channel" <*> v .: "value"
+      "select" -> SelectStmt pos <$> v .: "body"
+      "crement" -> do
+        op <- v .: "operation"
+        case op :: Text of
+          "++" -> IncDecStmt pos <$> v .: "target" <*> pure True
+          "--" -> IncDecStmt pos <$> v .: "target" <*> pure False
+          _ -> fail $ "FromJSON IncDecStatement: unknown operator " ++ show op
+      "switch" ->
+        SwitchStmt pos <$> v .:? "init" <*> v .:? "condition" <*> v .: "body"
+      "type-switch" ->
+        TypeSwitchStmt pos <$> v .:? "init" <*> v .: "assign" <*> v .: "body"
+      "select-clause" ->
+        CommClauseStmt pos <$> v .:? "statement" <*> v .: "body"
+      -- TODO: "nil means default case" this might mean that one of
+      -- the expressions in the list can be nil.
+      "case-clause" -> CaseClauseStmt pos <$> v .: "expressions" <*> v .: "body"
+      tp | tp `elem` ["assign", "define", "assign-operator"] -> do
+             assignType <- v .: "type"
+             case assignType :: Text of
+               "assign" ->
+                 AssignStmt pos Assign Nothing <$> v .: "left" <*> v .: "right"
+               "define" ->
+                 AssignStmt pos Define Nothing <$> v .: "left" <*> v .: "right"
+               "assign-operator" ->
+                 AssignStmt pos Define <$> (Just <$> v .: "operator")
+                 <*> v .: "left" <*> v .: "right"
+               _ -> fail $ "FromJSON AssignStatement: unknown assign type "
+                    ++ show assignType
+      "initializer" -> InitializerStmt <$> v .: "vars" <*> ((:[]) <$> v .: "value")
+      tp | tp `elem` ["break", "continue", "goto", "fallthrough"] ->
+           BranchStmt pos <$> v .: "type" <*> v .:? "label"
+      _ -> fail $ "FromJSON Stmt: unknown statement type " ++ show stmtType
+
+instance FromJSON (N Spec) where
+  parseJSON = withObject "Spec" $ \v -> do
+    pos <- v .: "position"
+    specType <- v .: "type"
+    case specType :: Text of
+      "import" -> ImportSpec pos <$> v .:? "name" <*> v .: "path"
+      "const" -> ConstSpec pos <$> v .: "names" <*>
+                 v .:? "declared-type" <*> v .: "values"
+      "var" -> VarSpec pos <$> v .: "names" <*>
+               v .:? "declared-type" <*> v .: "values"
+      "type" -> TypeSpec pos <$> v .: "name" <*> v .: "value"
+      _ -> fail $ "FromJSON Spec: unknown spec type " ++ show specType
+
+instance FromJSON T.BasicKind where
+  parseJSON = withText "BasicKind" $ \txt -> case lookup txt
+    [("Invalid", BasicInvalid), ("Bool", BasicBool),
+     ("Int", BasicInt Nothing), ("Int8", BasicInt $ Just 8),
+     ("Int16", BasicInt $ Just 16), ("Int32", BasicInt $ Just 32),
+     ("Int64", BasicInt $ Just 64), ("UInt", BasicUInt Nothing),
+     ("UInt8", BasicUInt $ Just 8), ("UInt16", BasicUInt $ Just 16),
+     ("UInt32", BasicUInt $ Just 32), ("UInt64", BasicUInt $ Just 64),
+     ("UIntptr", BasicUIntptr), ("Float32", BasicFloat 32),
+     ("Float64", BasicFloat 64), ("Complex64", BasicComplex 64),
+     ("Complex128", BasicComplex 128), ("String", BasicString),
+     ("UnsafePointer", BasicUnsafePointer),
+     ("UntypedBool", BasicUntyped UntypedBool),
+     ("UntypedInt", BasicUntyped UntypedInt),
+     ("UntypedRune", BasicUntyped UntypedRune),
+     ("UntypedFloat", BasicUntyped UntypedFloat),
+     ("UntypedComplex", BasicUntyped UntypedComplex),
+     ("UntypedString", BasicUntyped UntypedString),
+     ("UntypedNil", BasicUntyped UntypedNil)] of
+    Just k -> return k
+    _ -> fail $ "FromJSON BasicKind: unknown basic kind " ++ show txt
+
+instance FromJSON T.NameType where
+  parseJSON = withObject "NameType" $ \v ->
+    T.NameType <$> v .: "name" <*> v .: "type"
+
+instance FromJSON T.Type where
+  parseJSON = withObject "Type" $ \v -> do
+    tp <- v .: "type"
+    case tp :: Text of
+      "Array" -> T.ArrayType <$> v .: "len" <*> v .: "elem"
+      "Basic" -> T.BasicType <$> v .: "kind"
+      "Chan" -> T.ChanType <$> v .: "direction" <*> v .: "elem"
+      "Interface" -> T.InterfaceType <$> v .: "methods"
+      "Map" -> T.MapType <$> v .: "key" <*> v .: "elem"
+      "Named" -> T.NamedType <$> v .: "underlying"
+      "Pointer" -> T.PointerType <$> v .: "elem"
+      "Signature" -> do
+        params <- v .: "params"
+        -- Desugar 1-tuple result types to the inner type.
+        result <- v .: "results" >>= \rs -> case rs of
+          T.TupleType [rt] -> return $ T.typeOfNameType rt
+          _ -> return rs
+        case params of
+          T.TupleType ts ->
+            T.FuncType <$> v .:? "recv" <*> pure (T.typeOfNameType <$> ts)
+            <*> pure result <*> v .: "variadic"
+          _ -> fail $ "FromJSON Type: expected TupleType, got " ++ show params
+      "Slice" -> T.SliceType <$> v .: "elem"
+      "Struct" -> T.StructType <$> v .: "fields"
+      "Tuple" -> T.TupleType <$> v .: "fields"
+      _ -> fail $ "FromJSON Type: unknown type " ++ show v
+
+parseMain :: ByteString -> Either String (Node SourcePos Main)
+parseMain txt = eitherDecode txt

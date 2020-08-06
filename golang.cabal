@@ -3,19 +3,18 @@
 
 name:                golang
 version:             0.1.0.0
-synopsis:            A compiler front end for the Go programming language. Parser, AST and type analysis.
+synopsis:            
 -- description:         
 license:             BSD3
 license-file:        LICENSE
-author:              Andrey Chudnov
-maintainer:          Andrey Chudnov <andrey@galois.com>
-copyright:           (c) 2016-2017 Galois Inc.
-tested-with:         GHC==8.0.1
+author:              Alex Bagnall
+maintainer:          Alex Bagnall <abagnall@galois.com>
+copyright:           (c) 2020-2021 Galois Inc.
+tested-with:         GHC==8.6.5
 homepage:            https://github.com/GaloisInc/golang
 bug-reports:         https://github.com/GaloisInc/golang/issues
 category:            Language
 build-type:          Simple
--- extra-source-files:  
 cabal-version:       >=1.10
 
 Source-repository head
@@ -29,36 +28,37 @@ Source-repository this
                      
 library
   exposed-modules:     Language.Go.AST
+                       Language.Go.Desugar
                        Language.Go.Parser
+                       Language.Go.Rec
+                       Language.Go.Rename
                        Language.Go.Types
-                       Language.Go.Parser.Ambiguous
-                       Language.Go.Parser.Lexer
-  other-modules:       Language.Go.Bindings
-                       Language.Go.Bindings.Types
-                       Language.Go.Parser.Token
-                       Language.Go.Parser.Util
-                       Language.Go.Parser.State
-  -- other-extensions:    
+  other-modules:       
   build-depends:       base == 4.*
                      , mtl
-                     , charset
                      , text >= 1.2
-                     , alex-tools >= 0.1.1.0
-                     , array
-                     , semigroups
-                     , lens-simple
-                     , template-haskell
-                     , uniplate
+                     , aeson
+                     , bytestring
+                     , vector
                      , unordered-containers
-                     , containers
+                     , parameterized-utils
                      , data-default-class
-                     , directory
-                     , filepath
-                     , hashable
-                     , fgl
-                     , anastasia
-                     , partial-order
   hs-source-dirs:      src
-  ghc-options:       -Wall -O0
+  ghc-options:       -Wall -O0 -fno-warn-orphans -Wno-unticked-promoted-constructors
   default-language:    Haskell2010
-  Build-tools:         alex, happy
+  Build-tools:         
+
+executable golang
+
+  hs-source-dirs: exe
+  main-is: Main.hs
+
+  build-depends: base >= 4 && < 5
+               , text
+               , golang2
+               , bytestring
+
+  ghc-options: -Wall
+  ghc-prof-options: -O2 -fprof-auto-top
+
+  default-language: Haskell2010
