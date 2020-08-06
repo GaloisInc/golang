@@ -55,7 +55,6 @@ executable golang
 
   build-depends: base >= 4 && < 5
                , text
-               , golang2
                , bytestring
 
   ghc-options: -Wall
