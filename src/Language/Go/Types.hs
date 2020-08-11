@@ -1,5 +1,5 @@
 {-|
-Module      : Lang.Crucible.Go.Types
+Module      : Language.Go.Types
 Description : Golang type semantics
 Maintainer  : abagnall@galois.com
 Stability   : experimental
@@ -100,3 +100,15 @@ isUntyped _ = False
 mkReturnType :: [Type] -> Type
 mkReturnType [tp] = tp
 mkReturnType tps = TupleType $ typeToNameType <$> tps
+
+arrayTypeLen :: Type -> Int
+arrayTypeLen (ArrayType len _t) = len
+arrayTypeLen tp = error $ "arrayTypeLen: expected ArrayType, got" ++ show tp
+
+arrayTypeTy :: Type -> Type
+arrayTypeTy (ArrayType _len ty) = ty
+arrayTypeTy tp = error $ "arrayTypeTy: expected ArrayType, got" ++ show tp
+
+sliceTypeTy :: Type -> Type
+sliceTypeTy (SliceType ty) = ty
+sliceTypeTy tp = error $ "sliceTypeTy: expected SliceType, got" ++ show tp

@@ -1,5 +1,5 @@
 {-|
-Module      : Lang.Crucible.Go.Rename
+Module      : Language.Go.Rename
 Description : Golang renamer
 Maintainer  : abagnall@galois.com
 Stability   : experimental
@@ -22,8 +22,6 @@ import           Data.List (nub)
 import           Data.Text hiding (inits)
 
 import           Data.Parameterized.TraversableFC
-
-import           Debug.Trace (trace)
 
 import           Language.Go.AST
 import           Language.Go.Rec
@@ -50,14 +48,14 @@ newtype RM a (tp :: NodeType) =
   RM { unRM :: RM' (Node a tp) }
 
 runRM :: RState -> RM a tp -> Node a tp
-runRM st (RM m) = runIdentity $ evalStateT m st
+runRM st = runIdentity . (`evalStateT` st) . unRM
 
--- | Helper for running subterm renamer actions easily.
+-- | Helper for running subterm renamer actions.
 run :: Product (Node a) (RM a) tp -> RM' (Node a tp)
 run (Pair _node (RM m)) = m
 
 
--- | The renamer paramorphism algebra.
+-- | The renamer algebra.
 rename_alg :: Show a => NodeF a (Product (Node a) (RM a)) tp -> RM a tp
 
 rename_alg (MainNode nm pkg imports) = RM $ do
@@ -150,7 +148,8 @@ rename_alg (IdentExpr x tp Nothing ident@(Ident k name)) = RM $ do
   if name `elem` locals then return $ In $ IdentExpr x tp Nothing ident
     else do
     pkgName <- gets rs_package
-    return $ In $ IdentExpr x tp (Just (Ident IdentPkgName pkgName)) $ Ident k name
+    return $ In $ IdentExpr x tp (Just (Ident IdentPkgName pkgName)) $
+      Ident k name
 
 -- Do nothing for all other nodes.
 rename_alg node = RM $ In <$> traverseFC run node

@@ -1,5 +1,5 @@
 {-|
-Module      : Lang.Crucible.Go.Desugar
+Module      : Language.Go.Desugar
 Description : Go syntax desugarer
 Maintainer  : abagnall@galois.com
 Stability   : experimental
@@ -11,6 +11,7 @@ transformations:
 * convert variadic arguments to slice literals.
 * insert missing return statements and fill in "naked returns".
 * replace increment and decrement statements with assign statements.
+* eliminate assign operators (e.g., x += 1 becomes x = x + 1).
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
@@ -36,7 +37,7 @@ type DesugarM a = ExceptT String Identity a
 runDesugarM :: DesugarM a -> Either String a
 runDesugarM = runIdentity . runExceptT
 
--- | Desugar Go programs so they are more directly translatable to Crucible.
+-- | The desugar algebra.
 desugar_alg :: Show a => NodeF a (Node a) tp -> DesugarM (Node a tp)
 
 -- | Convert nil and type identifiers to their own different syntactic
@@ -51,12 +52,11 @@ desugar_alg (IdentExpr x tp qual (Ident kind name)) =
 
 -- | Generate projections for the RHS when it's a tuple.
 desugar_alg (AssignStmt x assign_tp op lhs rhs) =
-  case (assign_tp, op, lhs, rhs) of
-    (AssignOperator, Just binop, [l], [r]) ->
-      return $ In $ AssignStmt x Assign Nothing [l]
-      [In $ BinaryExpr x (typeOf' l) l binop r]
-    (_tp, _op, _l, _r) ->
-      return $ In $ AssignStmt x assign_tp op lhs $ unpack_tuple rhs
+  return $ case (assign_tp, op, lhs, rhs) of
+  (AssignOperator, Just binop, [l], [r]) -> mkBinopAssign x binop l r
+  (_tp, _op, _l, _r) ->
+    In $ AssignStmt x assign_tp op lhs $ unpack_tuple rhs
+
 
 desugar_alg (ConstSpec x names ty values) =
   return $ In $ ConstSpec x names ty $ unpack_tuple values
@@ -74,7 +74,7 @@ desugar_alg (ReturnStmt x results) =
 
 -- | Generate projections for arguments in the case of a single tuple
 -- argument, and deal with variadic arguments.
-desugar_alg (CallExpr x tp fun args) =
+desugar_alg (CallExpr x tp ellipsis fun args) =
   case typeOf' fun of
     FuncType _recv params _result variadic ->
       if variadic then
@@ -84,17 +84,19 @@ desugar_alg (CallExpr x tp fun args) =
             regular_args = take n args'
             variadic_arg = case drop n args' of
               -- It could be an actual slice value with the ellipsis syntax.
-              [In (EllipsisExpr _ _ (Just e))] -> e
+              [e] | ellipsis -> e
               -- Otherwise pack all of the variadic arguments into a
               -- slice literal. Use Nothing for the syntactic type
               -- field since we don't need it. Use 'last params'
               -- (always a slice type) for the semantic type.
-              args'' -> In $ CompositeLitExpr x (last params) Nothing args''
+              args'' ->
+                In $ CompositeLitExpr x (last params) Nothing args''
         in
-          return $ In $ CallExpr x tp fun $ regular_args ++ [variadic_arg]
+          return $ In $ CallExpr x tp False fun $ regular_args ++ [variadic_arg]
       else
-        return $ In $ CallExpr x tp fun $ unpack_tuple args
-    _ -> throwError $ "desugar_alg: expected FuncType, got " ++ show (typeOf' fun)
+        return $ In $ CallExpr x tp False fun $ unpack_tuple args
+    _ ->
+      throwError $ "desugar_alg: expected FuncType, got " ++ show (typeOf' fun)
 
 -- | Insert missing return statements and convert variadic to slice.
 desugar_alg (FuncDecl x recv name params variadic results
@@ -102,18 +104,15 @@ desugar_alg (FuncDecl x recv name params variadic results
   let params' = params ++ case variadic of
         Nothing -> []
         Just (In (FieldNode names tp tag)) ->
-          [In $ FieldNode names (In $ ArrayTypeExpr x
-                                 (SliceType $ typeOf' tp) Nothing tp) tag]
+          [In $ FieldNode names
+            (In $ ArrayTypeExpr x (typeOf' tp) Nothing tp) tag]
   return $ In $ FuncDecl x recv name params' Nothing results $ Just $ In $
     BlockNode $ insert_returns x (mkTuple x $ field_names x results) body
 
 -- | Desugar increment and decrement statements to assign statements.
-desugar_alg (IncDecStmt x expr is_incr) = do
-  return $ In $ AssignStmt x AssignOperator
-    (Just $ if is_incr then BPlus else BMinus) [expr] $
-    [In $ BasicLitExpr x (BasicType $ BasicInt Nothing) $
-     BasicLit { basiclit_type = LiteralInt
-              , basiclit_value = "1" }]
+desugar_alg (IncDecStmt x expr is_incr) =
+  return $ mkBinopAssign x (if is_incr then BPlus else BMinus) expr $
+  In $ BasicConstExpr x (BasicType $ BasicUntyped UntypedInt) $ BasicConstInt 1
 
 -- | Do nothing for all other nodes.
 desugar_alg n = return $ In n
@@ -155,3 +154,7 @@ field_names x = map $ \(In (FieldNode [nm] tp _)) ->
 
 mkTuple :: a -> [Node a Expr] -> Node a Expr
 mkTuple x es = In $ TupleExpr x (TupleType $ typeToNameType . typeOf' <$> es) es
+
+mkBinopAssign :: a -> BinaryOp -> Node a Expr -> Node a Expr -> Node a Stmt
+mkBinopAssign x binop l r =
+  In $ AssignStmt x Assign Nothing [l] [In $ BinaryExpr x (typeOf' l) l binop r]

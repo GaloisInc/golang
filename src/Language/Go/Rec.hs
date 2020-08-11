@@ -1,5 +1,5 @@
 {-|
-Module      : Lang.Crucible.Go.Rec
+Module      : Language.Go.Rec
 Description : Golang recursion schemes
 Maintainer  : abagnall@galois.com
 Stability   : experimental

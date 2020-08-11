@@ -1,5 +1,5 @@
 {-|
-Module      : Lang.Crucible.Go.AST
+Module      : Language.Go.AST
 Description : Go language abstract syntax
 Maintainer  : abagnall@galois.com
 Stability   : experimental
@@ -210,6 +210,7 @@ data NodeF (a :: *) (f :: NodeType -> *) (i :: NodeType) where
 
   -- | An expression followed by an argument list.
   CallExpr :: a -> Type
+           -> Bool -- ^ true if the last argument is an ellipsis
            -> f Expr -- ^ function expression
            -> [f Expr] -- ^ function arguments
            -> NodeF a f Expr
@@ -236,7 +237,7 @@ data NodeF (a :: *) (f :: NodeType -> *) (i :: NodeType) where
                -> Maybe (f Expr) -- ^ ellipsis element type (parameter
                                  -- lists only); or nil
                -> NodeF a f Expr
-  
+
   -- | A function literal.
   FuncLitExpr :: a -> Type
               -> [f Field] -- ^ function parameter types
@@ -377,14 +378,14 @@ data NodeF (a :: *) (f :: NodeType -> *) (i :: NodeType) where
 
   ----------------------------------------------------------------------
   -- Variable type binding
-  
+
   Binding :: Ident
           -> f Expr
           -> NodeF a f Bind
 
   ----------------------------------------------------------------------
   -- Specifications
-  
+
   -- | A single package import.
   ImportSpec :: a
              -> Maybe Ident -- ^ local package name (including "."); or nil
@@ -414,7 +415,7 @@ data NodeF (a :: *) (f :: NodeType -> *) (i :: NodeType) where
 
   ----------------------------------------------------------------------
   -- Misc
-  
+
   -- | A Field represents a Field declaration list in a struct type, a
   -- method list in an interface type, or a parameter/result
   -- declaration in a signature. Field.Names is nil for unnamed
@@ -425,7 +426,7 @@ data NodeF (a :: *) (f :: NodeType -> *) (i :: NodeType) where
             -> f Expr -- ^ field/method/parameter type
             -> Maybe BasicLit -- ^ field tag; or nil
             -> NodeF a f Field
-  
+
   -- | A braced statement list.
   BlockNode :: [f Stmt]
             -> NodeF a f Block
@@ -461,6 +462,7 @@ data BasicLit =
   }
   deriving (Eq, Show)
 
+-- | Float constants are represented by rationals by Go's constant evaluator.
 data BasicConst =
   BasicConstBool Bool
   | BasicConstString Text
@@ -505,7 +507,7 @@ annotOf :: NodeF a f Expr -> a
 annotOf (BasicLitExpr x _ _) = x
 annotOf (BasicConstExpr x _ _) = x
 annotOf (BinaryExpr x _ _ _ _) = x
-annotOf (CallExpr x _ _ _) = x
+annotOf (CallExpr x _ _ _ _) = x
 annotOf (CastExpr x _ _ _) = x
 annotOf (CompositeLitExpr x _ _ _) = x
 annotOf (IdentExpr x _ _ _) = x
@@ -538,7 +540,7 @@ typeOf :: NodeF a f Expr -> Type
 typeOf (BasicLitExpr _ tp _) = tp
 typeOf (BasicConstExpr _ tp _) = tp
 typeOf (BinaryExpr _ tp _ _ _) = tp
-typeOf (CallExpr _ tp _ _) = tp
+typeOf (CallExpr _ tp _ _ _) = tp
 typeOf (CastExpr _ tp _ _) = tp
 typeOf (CompositeLitExpr _ tp _ _) = tp
 typeOf (IdentExpr _ tp _ _) = tp
@@ -627,8 +629,8 @@ instance TraversableFC (NodeF a) where
   traverseFC _f (BasicConstExpr x tp c) = pure $ BasicConstExpr x tp c
   traverseFC f (BinaryExpr x tp left op right) =
     BinaryExpr x tp <$> f left <*> pure op <*> f right
-  traverseFC f (CallExpr x tp fun args) =
-    CallExpr x tp <$> f fun <*> traverse f args
+  traverseFC f (CallExpr x tp b fun args) =
+    CallExpr x tp b <$> f fun <*> traverse f args
   traverseFC f (CastExpr x tp e ty) = CastExpr x tp <$> f e <*> f ty
   traverseFC f (CompositeLitExpr x tp ty es) =
     CompositeLitExpr x tp <$> traverse f ty <*> traverse f es

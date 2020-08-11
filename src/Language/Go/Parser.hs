@@ -1,5 +1,5 @@
 {-|
-Module      : Lang.Crucible.Go.Parser
+Module      : Language.Go.Parser
 Description : JSON AST deserializer
 Maintainer  : abagnall@galois.com
 Stability   : experimental
@@ -42,8 +42,8 @@ noPos = SourcePos { pos_filename = ""
                   }
 
 -- | Type synonym for a single unfolding of the Node type. It's easier
--- to define FromJSON instances for this and then derive the
--- corresponding instance for Node automatically.
+-- to define FromJSON instances for this and derive the corresponding
+-- Node instances automatically.
 type N (i :: NodeType) = NodeF SourcePos (Fix (NodeF SourcePos)) i
 
 instance FromJSON SourcePos where
@@ -115,7 +115,8 @@ instance FromJSON BasicLitType where
                      ("IMAG", LiteralImag), ("CHAR", LiteralChar),
                      ("STRING", LiteralString)] of
       Just tp -> return tp
-      _ -> fail $ "FromJSON BasicLitType: unknown basic literal type " ++ show txt
+      _ ->
+        fail $ "FromJSON BasicLitType: unknown basic literal type " ++ show txt
 
 instance FromJSON BasicConst where
   parseJSON = withObject "BasicConst" $ \v -> do
@@ -126,7 +127,8 @@ instance FromJSON BasicConst where
       "INT" -> BasicConstInt . read <$> v .: "value"
       "FLOAT" -> BasicConstFloat <$> v .: "numerator" <*> v .: "denominator"
       "COMPLEX" -> BasicConstFloat <$> v .: "real" <*> v .: "imaginary"
-      _t -> fail $ "FromJSON BasicConst: unknown constant type: " ++ show exprType
+      _t ->
+        fail $ "FromJSON BasicConst: unknown constant type: " ++ show exprType
 
 instance FromJSON ChanDir where
   parseJSON = withText "ChanDir" $ \txt -> case txt of
@@ -155,7 +157,8 @@ instance FromJSON (N Expr) where
           "function" -> FuncTypeExpr pos go_tp <$> v .: "params" <*>
                         v .:? "variadic" <*> v .:? "results" .!= []
           "ellipsis" -> EllipsisExpr pos go_tp <$> v .:? "value"
-          "identifier" -> IdentExpr pos go_tp <$> v .:? "qualifier" <*> v .: "value"
+          "identifier" ->
+            IdentExpr pos go_tp <$> v .:? "qualifier" <*> v .: "value"
           _ -> fail $ "FromJSON Expr: unknown expression of kind 'type': "
                ++ show exprType
       "literal" -> do
@@ -172,20 +175,21 @@ instance FromJSON (N Expr) where
         case exprType :: Text of
           "index" -> IndexExpr pos go_tp <$> v .: "target" <*> v .: "index"
           "star" -> StarExpr pos go_tp <$> v .: "target"
-          "call" -> CallExpr pos go_tp <$> v .: "function" <*> v .: "arguments"
+          "call" -> CallExpr pos go_tp <$>
+                    v .: "ellipsis" <*> v .: "function" <*> v .: "arguments"
           "cast" -> CastExpr pos go_tp <$> v .: "target" <*> v .: "coerced-to"
           -- Special cases for 'make' and 'new' builtins
           "make" -> do
             type_arg <- v .: "argument"
             rest_args <- v .: "rest"
             -- TODO: need to infer the type of the 'make' identifier?
-            return $ CallExpr pos go_tp
+            return $ CallExpr pos go_tp False
               (In $ IdentExpr pos T.NoType Nothing $ Ident T.IdentFunc "make") $
               type_arg : rest_args
           "new" -> do
             -- TODO: need to infer the type of the 'new' identifier?
             type_arg <- v .: "argument"
-            return $ CallExpr pos go_tp
+            return $ CallExpr pos go_tp False
               (In $ IdentExpr pos T.NoType Nothing $
                 Ident T.IdentFunc "new") [type_arg]
           "paren" -> ParenExpr pos go_tp <$> v .: "target"
@@ -198,7 +202,8 @@ instance FromJSON (N Expr) where
               -- Special case for IOTA: whenever the type is "IOTA"
               -- the value should be "IOTA" as well.
               Just "IOTA" ->
-                return $ IdentExpr pos go_tp Nothing $ Ident T.IdentNoKind "IOTA"
+                return $ IdentExpr pos go_tp Nothing $
+                          Ident T.IdentNoKind "IOTA"
               _ -> IdentExpr pos go_tp <$> v .:? "qualifier" <*> v .: "value"
             _ -> fail ""
           "slice" ->
@@ -276,8 +281,6 @@ instance FromJSON (N Stmt) where
         TypeSwitchStmt pos <$> v .:? "init" <*> v .: "assign" <*> v .: "body"
       "select-clause" ->
         CommClauseStmt pos <$> v .:? "statement" <*> v .: "body"
-      -- TODO: "nil means default case" this might mean that one of
-      -- the expressions in the list can be nil.
       "case-clause" -> CaseClauseStmt pos <$> v .: "expressions" <*> v .: "body"
       tp | tp `elem` ["assign", "define", "assign-operator"] -> do
              assignType <- v .: "type"
@@ -287,11 +290,12 @@ instance FromJSON (N Stmt) where
                "define" ->
                  AssignStmt pos Define Nothing <$> v .: "left" <*> v .: "right"
                "assign-operator" ->
-                 AssignStmt pos Define <$> (Just <$> v .: "operator")
+                 AssignStmt pos AssignOperator <$> (Just <$> v .: "operator")
                  <*> v .: "left" <*> v .: "right"
                _ -> fail $ "FromJSON AssignStatement: unknown assign type "
                     ++ show assignType
-      "initializer" -> InitializerStmt <$> v .: "vars" <*> ((:[]) <$> v .: "value")
+      "initializer" ->
+        InitializerStmt <$> v .: "vars" <*> ((:[]) <$> v .: "value")
       tp | tp `elem` ["break", "continue", "goto", "fallthrough"] ->
            BranchStmt pos <$> v .: "type" <*> v .:? "label"
       _ -> fail $ "FromJSON Stmt: unknown statement type " ++ show stmtType
