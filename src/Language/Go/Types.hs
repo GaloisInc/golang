@@ -112,3 +112,13 @@ arrayTypeTy tp = error $ "arrayTypeTy: expected ArrayType, got" ++ show tp
 sliceTypeTy :: Type -> Type
 sliceTypeTy (SliceType ty) = ty
 sliceTypeTy tp = error $ "sliceTypeTy: expected SliceType, got" ++ show tp
+
+-- | The type of the built-in 'new' function, given the element
+-- type. Use empty list for argument types.
+newType :: Type -> Type
+newType tp = FuncType Nothing [] (PointerType tp) False
+
+-- | The type of the built-in 'make' function, given the element
+-- type. Use empty list for argument types.
+makeType :: Type -> Type
+makeType tp = FuncType Nothing [] tp False

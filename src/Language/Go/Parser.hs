@@ -184,13 +184,14 @@ instance FromJSON (N Expr) where
             rest_args <- v .: "rest"
             -- TODO: need to infer the type of the 'make' identifier?
             return $ CallExpr pos go_tp False
-              (In $ IdentExpr pos T.NoType Nothing $ Ident T.IdentFunc "make") $
+              (In $ IdentExpr pos (T.makeType $ typeOf' type_arg) Nothing $
+                Ident T.IdentFunc "make") $
               type_arg : rest_args
           "new" -> do
             -- TODO: need to infer the type of the 'new' identifier?
             type_arg <- v .: "argument"
             return $ CallExpr pos go_tp False
-              (In $ IdentExpr pos T.NoType Nothing $
+              (In $ IdentExpr pos (T.newType $ typeOf' type_arg) Nothing $
                 Ident T.IdentFunc "new") [type_arg]
           "paren" -> ParenExpr pos go_tp <$> v .: "target"
           "selector" ->

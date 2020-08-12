@@ -414,7 +414,7 @@ data NodeF (a :: *) (f :: NodeType -> *) (i :: NodeType) where
            -> NodeF a f Spec
 
   ----------------------------------------------------------------------
-  -- Misc
+  -- Misc.
 
   -- | A Field represents a Field declaration list in a struct type, a
   -- method list in an interface type, or a parameter/result
@@ -582,7 +582,7 @@ instance FunctorFC (NodeF a) where
 instance FoldableFC (NodeF a) where
   foldMapFC = foldMapFCDefault
 
--- It would be nice to derive this automatically but using
+-- It would be nice to derive this automatically using
 -- structuralTraversal.
 instance TraversableFC (NodeF a) where
   traverseFC f (MainNode nm pkg pkgs) =
