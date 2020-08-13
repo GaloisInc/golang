@@ -723,3 +723,8 @@ readBool s = case s of
   "true" -> True
   "false" -> False
   _ -> error $ "readBool: not a bool: " ++ show s
+
+isLoop :: Node a tp -> Bool
+isLoop (In (ForStmt _x _ini _cond _post _body)) = True
+isLoop (In (RangeStmt _x _k _v _e _body _assign)) = True
+isLoop _node = False

@@ -97,6 +97,11 @@ isUntyped :: Type -> Bool
 isUntyped (BasicType (BasicUntyped _)) = True
 isUntyped _ = False
 
+isArrayOrSliceType :: Type -> Bool
+isArrayOrSliceType (ArrayType _len _tp) = True
+isArrayOrSliceType (SliceType _tp) = True
+isArrayOrSliceType _tp = False
+
 mkReturnType :: [Type] -> Type
 mkReturnType [tp] = tp
 mkReturnType tps = TupleType $ typeToNameType <$> tps

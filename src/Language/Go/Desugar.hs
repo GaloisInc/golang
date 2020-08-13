@@ -12,6 +12,7 @@ transformations:
 * insert missing return statements and fill in "naked returns".
 * replace increment and decrement statements with assign statements.
 * eliminate assign operators (e.g., x += 1 becomes x = x + 1).
+* replace 'x != y' binary expressions with '!(x == y)'.
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
@@ -98,6 +99,10 @@ desugar_alg (CallExpr x tp ellipsis fun args) =
     _ ->
       throwError $ "desugar_alg: expected FuncType, got " ++ show (typeOf' fun)
 
+-- | Desugar 'x != y' to '!(x == y)'.
+desugar_alg (BinaryExpr x tp left BNeq right) =
+  return $ In $ UnaryExpr x tp UNot $ In $ BinaryExpr x tp left BEq right
+
 -- | Insert missing return statements and convert variadic to slice.
 desugar_alg (FuncDecl x recv name params variadic results
              (Just (In (BlockNode body)))) = do
@@ -113,6 +118,30 @@ desugar_alg (FuncDecl x recv name params variadic results
 desugar_alg (IncDecStmt x expr is_incr) =
   return $ mkBinopAssign x (if is_incr then BPlus else BMinus) expr $
   In $ BasicConstExpr x (BasicType $ BasicUntyped UntypedInt) $ BasicConstInt 1
+
+-- | Desugar range statements over slices or arrays to regular 'for'
+-- loops with index counter variables.
+desugar_alg stmt@(RangeStmt x key value range body is_assign) =
+  return $ In $
+  if isArrayOrSliceType $ typeOf' range then
+    ForStmt x (Just undefined) (Just undefined) (Just undefined) undefined
+  else
+    stmt
+
+  -- ForStmt :: a
+  --         -> Maybe (f Stmt) -- ^ initialization statement; or nil
+  --         -> Maybe (f Expr) -- ^ condition; or nil
+  --         -> Maybe (f Stmt) -- ^ post iteration statement; or nil
+  --         -> f Block -- ^ loop body
+  --         -> NodeF a f Stmt
+
+  -- RangeStmt :: a
+  --           -> Maybe (f Expr) -- ^ key
+  --           -> Maybe (f Expr) -- ^ value
+  --           -> f Expr -- ^ value to range over
+  --           -> f Block -- ^ body
+  --           -> Bool -- ^ is assign?
+  --           -> NodeF a f Stmt
 
 -- | Do nothing for all other nodes.
 desugar_alg n = return $ In n
