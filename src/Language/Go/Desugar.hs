@@ -16,6 +16,7 @@ transformations:
 * replace 'x[i]' with '(*x)[i]' when x is a pointer to an array.
 * fill variable declarations with no initial values with zero
   values. e.g., 'var x int32' becomes 'var x int32 = 0'.
+* rewrite 'range' loops to 'for' loops (not for maps).
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
@@ -57,7 +58,7 @@ desugar_alg (IdentExpr x tp qual (Ident kind name)) =
 -- | Generate projections for the RHS when it's a tuple.
 desugar_alg (AssignStmt x assign_tp op lhs rhs) =
   return $ case (assign_tp, op, lhs, rhs) of
-  (AssignOperator, Just binop, [l], [r]) -> mkBinopAssign x binop l r
+  (AssignOperator, Just binop, [l], [r]) -> mkBinopAssign x Assign binop l r
   (_tp, _op, _l, _r) ->
     In $ AssignStmt x assign_tp op lhs $ unpack_tuple rhs
 
@@ -130,22 +131,9 @@ desugar_alg (FuncDecl x recv name params variadic results
   return $ In $ FuncDecl x recv name params' Nothing results $ Just $ In $
     BlockNode $ insert_returns x (mkTuple x $ field_names x results) body
 
--- -- | Insert missing return statements and convert variadic to slice.
--- desugar_alg (FuncDecl x recv name params variadic results
---              (Just (In (BlockNode body)))) = do
---   let params' = params ++ case variadic of
---         Nothing -> []
---         Just (In (FieldNode names tp tag)) ->
---           [In $ FieldNode names
---             (In $ ArrayTypeExpr x (typeOf' tp) Nothing tp) tag]
---   let return_val = mkTuple x $ field_names x results
---   let body' = insert_returns x return_val body
---   return $ In $ FuncDecl x recv name params' Nothing results $ Just $ In $
---     BlockNode body'
-
 -- | Desugar increment and decrement statements to assign statements.
 desugar_alg (IncDecStmt x expr is_incr) =
-  return $ mkBinopAssign x (if is_incr then BPlus else BMinus) expr $
+  return $ mkBinopAssign x Assign (if is_incr then BPlus else BMinus) expr $
   In $ BasicConstExpr x (BasicType $ BasicUntyped UntypedInt) $ BasicConstInt 1
 
 -- | Desugar range statements over slices, arrays, strings, or
@@ -154,7 +142,8 @@ desugar_alg (IncDecStmt x expr is_incr) =
 desugar_alg stmt@(RangeStmt x key value range (In (BlockNode body)) is_assign) =
   return $ In $
   if isArrayOrSliceType (typeOf' range) || isStringType (typeOf' range) then
-    ForStmt x (Just $ ini) (Just $ cond range) Nothing $ In $ BlockNode $ body' range
+    ForStmt x (Just $ ini) (Just $ cond range) (Just post) $
+    In $ BlockNode $ body' range
   else case typeOf' range of
     PointerType arr_tp@(ArrayType _len _tp) ->
       let deref = In $ StarExpr x arr_tp range in
@@ -163,23 +152,22 @@ desugar_alg stmt@(RangeStmt x key value range (In (BlockNode body)) is_assign) =
     _tp -> stmt
   where
     assign_op = if is_assign then Assign else Define
-    -- Generate variable name not appearing in the body. For now we
-    -- use a fixed identifier that is illegal in Go. Nested 'range'
-    -- loops will reuse the same variable but it should be fine
-    -- because it only needs to be in scope for the first two
-    -- statements of the body (which we generate).
+    -- Generate a fresh variable name. For now we use a fixed
+    -- identifier that is illegal in Go. Nested 'range' loops will
+    -- reuse the same variable but it should be fine because it only
+    -- needs to be in scope for the first two statements of the body
+    -- that we generate.
     ix = In $ IdentExpr x (intType Nothing) Nothing $ Ident IdentVar "?i"
-    -- Initialize index variable with 0.
-    ini = In $ AssignStmt x Define Nothing [ix]
-      [In $ BasicConstExpr x (intType Nothing) $ BasicConstInt 0]
+    ini = In $ AssignStmt x Define Nothing [ix] [intConst x Nothing 0]
     cond e = In $ BinaryExpr x boolType ix BLt $
       In $ CallExpr x (intType Nothing) False
       (In $ IdentExpr x NoType Nothing $ Ident IdentFunc "len")
       [e]
+    post = mkBinopAssign x Assign BPlus ix $ intConst x Nothing 1
     body' e =
       maybe [] (\k -> [In $ AssignStmt x assign_op Nothing [k] [ix]]) key ++
       maybe [] (\v -> [In $ AssignStmt x assign_op Nothing [v]
-                        [In $ IndexExpr x (typeOf' v) e ix]]) value ++ body
+                        [In $ IndexExpr x (elementType $ typeOf' e) e ix]]) value ++ body
 
 -- | Do nothing for all other nodes.
 desugar_alg n = return $ In n
@@ -218,10 +206,6 @@ insert_returns x e [stmt] = [stmt, In $ ReturnStmt x [e]]
 -- Recurse to get to the last statement.
 insert_returns x e (stmt:stmts) = stmt : insert_returns x e stmts
 
--- field_names :: a -> [Node a Field] -> [Node a Expr]
--- field_names x = map $ \(In (FieldNode [nm] tp _)) ->
---   In $ IdentExpr x (typeOf' tp) Nothing nm
-
 field_names :: a -> [Node a Field] -> [Node a Expr]
 field_names x = concatMap $ \(In (FieldNode nms tp _)) ->
   (In . IdentExpr x (typeOf' tp) Nothing) <$> nms
@@ -229,6 +213,8 @@ field_names x = concatMap $ \(In (FieldNode nms tp _)) ->
 mkTuple :: a -> [Node a Expr] -> Node a Expr
 mkTuple x es = In $ TupleExpr x (TupleType $ typeToNameType . typeOf' <$> es) es
 
-mkBinopAssign :: a -> BinaryOp -> Node a Expr -> Node a Expr -> Node a Stmt
-mkBinopAssign x binop l r =
-  In $ AssignStmt x Assign Nothing [l] [In $ BinaryExpr x (typeOf' l) l binop r]
+mkBinopAssign :: a -> AssignType -> BinaryOp
+              -> Node a Expr -> Node a Expr
+              -> Node a Stmt
+mkBinopAssign x assignType binop l r =
+  In $ AssignStmt x assignType Nothing [l] [In $ BinaryExpr x (typeOf' l) l binop r]

@@ -114,13 +114,15 @@ arrayTypeLen :: Type -> Int
 arrayTypeLen (ArrayType len _t) = len
 arrayTypeLen tp = error $ "arrayTypeLen: expected ArrayType, got" ++ show tp
 
-arrayTypeTy :: Type -> Type
-arrayTypeTy (ArrayType _len ty) = ty
-arrayTypeTy tp = error $ "arrayTypeTy: expected ArrayType, got" ++ show tp
-
-sliceTypeTy :: Type -> Type
-sliceTypeTy (SliceType ty) = ty
-sliceTypeTy tp = error $ "sliceTypeTy: expected SliceType, got" ++ show tp
+elementType :: Type -> Type
+elementType (ArrayType _len tp) = tp
+elementType (SliceType tp) = tp
+-- Special case for pointers to arrays.
+elementType (PointerType (ArrayType _len tp)) = tp
+elementType (PointerType tp) = tp
+elementType (MapType _k tp) = tp
+elementType (ChanType _dir tp) = tp
+elementType tp = error $ "elementType: invalid type " ++ show tp
 
 -- | The type of the built-in 'new' function, given the element
 -- type. Use empty list for argument types.
