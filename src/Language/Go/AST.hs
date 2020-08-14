@@ -28,7 +28,7 @@ constant expressions (most literals end up as BasicConstExprs).
 {-# LANGUAGE StandaloneDeriving #-}
 module Language.Go.AST where
 
-import           Data.Text hiding (inits)
+import           Data.Text hiding (inits, replicate)
 
 import           Data.Parameterized.TraversableFC
 
@@ -728,3 +728,72 @@ isLoop :: Node a tp -> Bool
 isLoop (In (ForStmt _x _ini _cond _post _body)) = True
 isLoop (In (RangeStmt _x _k _v _e _body _assign)) = True
 isLoop _node = False
+
+boolConst :: a -> Bool -> Node a Expr
+boolConst x b = In $ BasicConstExpr x boolType (BasicConstBool b)
+
+intConst :: a -> Maybe Int -> Integer -> Node a Expr
+intConst x w i = In $ BasicConstExpr x (intType w) (BasicConstInt i)
+
+uintConst :: a -> Maybe Int -> Integer -> Node a Expr
+uintConst x w i = In $ BasicConstExpr x (uintType w) (BasicConstInt i)
+
+floatConst :: a -> Int -> BasicConst -> BasicConst -> Node a Expr
+floatConst x w num denom =
+  In $ BasicConstExpr x (floatType w) (BasicConstFloat num denom)
+
+complexConst :: a -> Int -> BasicConst -> BasicConst -> Node a Expr
+complexConst x w real imag =
+  In $ BasicConstExpr x (complexType w) (BasicConstComplex real imag)
+
+stringConst :: a -> Text -> Node a Expr
+stringConst x str = In $ BasicConstExpr x stringType $ BasicConstString str
+  
+-- | Zero value expressions for every type.
+zeroExpr :: a -> Type -> Node a Expr
+zeroExpr x NoType = error "zeroExpr: NoType"
+zeroExpr x (ArrayType len tp) = zeroArray x len tp
+zeroExpr x (BasicType basicKind) = zeroBasic x basicKind
+zeroExpr x tp@(ChanType _dir _tp) = In $ NilExpr x tp
+zeroExpr x tp@(InterfaceType _fields) = In $ NilExpr x tp
+zeroExpr x tp@(MapType _s _t) = In $ NilExpr x tp
+zeroExpr x (NamedType tp) = zeroExpr x tp
+zeroExpr x tp@(PointerType _tp) = In $ NilExpr x tp
+zeroExpr x tp@(FuncType _recv _params _return _variadic) = In $ NilExpr x tp
+zeroExpr x tp@(SliceType _tp) = In $ NilExpr x tp
+zeroExpr x (StructType fields) = error "zeroExpr: struct not yet supported"
+zeroExpr x (TupleType fields) = zeroTuple x fields
+
+zeroBasic :: a -> BasicKind -> Node a Expr
+zeroBasic x BasicInvalid = error ""
+zeroBasic x BasicBool = boolConst x False
+zeroBasic x (BasicInt w) = intConst x w 0
+zeroBasic x (BasicUInt w) = uintConst x w 0
+zeroBasic x BasicUIntptr = In $ NilExpr x $ BasicType BasicUIntptr
+zeroBasic x (BasicFloat w) = floatConst x w (BasicConstInt 0) (BasicConstInt 1)
+zeroBasic x (BasicComplex w) =
+  complexConst x w (BasicConstFloat (BasicConstInt 0) (BasicConstInt 1))
+  (BasicConstFloat (BasicConstInt 0) (BasicConstInt 1))
+zeroBasic x BasicString = stringConst x ""
+zeroBasic x BasicUnsafePointer = In $ NilExpr x $ BasicType BasicUnsafePointer
+zeroBasic x (BasicUntyped untypedKind) = zeroUntyped x untypedKind
+
+zeroUntyped :: a -> UntypedKind -> Node a Expr
+zeroUntyped x UntypedBool = boolConst x False
+zeroUntyped x UntypedInt = intConst x Nothing 0
+zeroUntyped x UntypedRune = intConst x (Just 8) 0
+zeroUntyped x UntypedFloat = floatConst x 64 (BasicConstInt 0) (BasicConstInt 1)
+zeroUntyped x UntypedComplex =
+  complexConst x (128) (BasicConstFloat (BasicConstInt 0) (BasicConstInt 1))
+  (BasicConstFloat (BasicConstInt 0) (BasicConstInt 1))
+zeroUntyped x UntypedString = stringConst x ""
+zeroUntyped x UntypedNil = In $ NilExpr x $ BasicType $ BasicUntyped UntypedNil
+
+zeroArray :: a -> Int -> Type -> Node a Expr
+zeroArray x len tp =
+  In $ CompositeLitExpr x (ArrayType len tp) Nothing $
+  replicate len $ zeroExpr x tp
+
+zeroTuple :: a -> [NameType] -> Node a Expr
+zeroTuple x tps =
+  In $ TupleExpr x (TupleType tps) $ zeroExpr x . typeOfNameType <$> tps

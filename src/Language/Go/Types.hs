@@ -102,6 +102,10 @@ isArrayOrSliceType (ArrayType _len _tp) = True
 isArrayOrSliceType (SliceType _tp) = True
 isArrayOrSliceType _tp = False
 
+isStringType :: Type -> Bool
+isStringType (BasicType BasicString) = True
+isStringType _tp = False
+
 mkReturnType :: [Type] -> Type
 mkReturnType [tp] = tp
 mkReturnType tps = TupleType $ typeToNameType <$> tps
@@ -127,3 +131,21 @@ newType tp = FuncType Nothing [] (PointerType tp) False
 -- type. Use empty list for argument types.
 makeType :: Type -> Type
 makeType tp = FuncType Nothing [] tp False
+
+boolType :: Type
+boolType = BasicType BasicBool
+
+intType :: Maybe Int -> Type
+intType w = BasicType $ BasicInt w
+
+uintType :: Maybe Int -> Type
+uintType w = BasicType $ BasicUInt w
+
+floatType :: Int -> Type
+floatType w = BasicType $ BasicFloat w
+
+complexType :: Int -> Type
+complexType w = BasicType $ BasicComplex w
+
+stringType :: Type
+stringType = BasicType BasicString

@@ -13,6 +13,9 @@ transformations:
 * replace increment and decrement statements with assign statements.
 * eliminate assign operators (e.g., x += 1 becomes x = x + 1).
 * replace 'x != y' binary expressions with '!(x == y)'.
+* replace 'x[i]' with '(*x)[i]' when x is a pointer to an array.
+* fill variable declarations with no initial values with zero
+  values. e.g., 'var x int32' becomes 'var x int32 = 0'.
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
@@ -58,11 +61,18 @@ desugar_alg (AssignStmt x assign_tp op lhs rhs) =
   (_tp, _op, _l, _r) ->
     In $ AssignStmt x assign_tp op lhs $ unpack_tuple rhs
 
+desugar_alg (ConstSpec x names ty values) = case (ty, values) of
+  (Just ty', []) ->
+    return $ In $ ConstSpec x names ty $ zeroExpr x (typeOf' ty') <$ names
+  _ ->
+    return $ In $ ConstSpec x names ty $ unpack_tuple values
 
-desugar_alg (ConstSpec x names ty values) =
-  return $ In $ ConstSpec x names ty $ unpack_tuple values
-desugar_alg (VarSpec x names ty values) =
-  return $ In $ VarSpec x names ty $ unpack_tuple values
+desugar_alg (VarSpec x names ty values) = case (ty, values) of
+  (Just ty', []) ->
+    return $ In $ VarSpec x names ty $ zeroExpr x (typeOf' ty') <$ names
+  _ ->
+    return $ In $ VarSpec x names ty $ unpack_tuple values
+
 desugar_alg (InitializerStmt vars values) =
   return $ In $ InitializerStmt vars $ unpack_tuple values
 
@@ -103,6 +113,12 @@ desugar_alg (CallExpr x tp ellipsis fun args) =
 desugar_alg (BinaryExpr x tp left BNeq right) =
   return $ In $ UnaryExpr x tp UNot $ In $ BinaryExpr x tp left BEq right
 
+-- | Desugar 'x[i]' to '(*x)[i]' when x is a pointer to an array.
+desugar_alg (IndexExpr x tp e ix) = case tp of
+  PointerType arr_tp@(ArrayType _len _tp) ->
+    return $ In $ IndexExpr x tp (In $ StarExpr x arr_tp e) ix
+  _tp -> return $ In $ IndexExpr x tp e ix
+
 -- | Insert missing return statements and convert variadic to slice.
 desugar_alg (FuncDecl x recv name params variadic results
              (Just (In (BlockNode body)))) = do
@@ -114,34 +130,56 @@ desugar_alg (FuncDecl x recv name params variadic results
   return $ In $ FuncDecl x recv name params' Nothing results $ Just $ In $
     BlockNode $ insert_returns x (mkTuple x $ field_names x results) body
 
+-- -- | Insert missing return statements and convert variadic to slice.
+-- desugar_alg (FuncDecl x recv name params variadic results
+--              (Just (In (BlockNode body)))) = do
+--   let params' = params ++ case variadic of
+--         Nothing -> []
+--         Just (In (FieldNode names tp tag)) ->
+--           [In $ FieldNode names
+--             (In $ ArrayTypeExpr x (typeOf' tp) Nothing tp) tag]
+--   let return_val = mkTuple x $ field_names x results
+--   let body' = insert_returns x return_val body
+--   return $ In $ FuncDecl x recv name params' Nothing results $ Just $ In $
+--     BlockNode body'
+
 -- | Desugar increment and decrement statements to assign statements.
 desugar_alg (IncDecStmt x expr is_incr) =
   return $ mkBinopAssign x (if is_incr then BPlus else BMinus) expr $
   In $ BasicConstExpr x (BasicType $ BasicUntyped UntypedInt) $ BasicConstInt 1
 
--- | Desugar range statements over slices or arrays to regular 'for'
--- loops with index counter variables.
-desugar_alg stmt@(RangeStmt x key value range body is_assign) =
+-- | Desugar range statements over slices, arrays, strings, or
+-- pointers to arrays to regular 'for' loops with index counter
+-- variables.
+desugar_alg stmt@(RangeStmt x key value range (In (BlockNode body)) is_assign) =
   return $ In $
-  if isArrayOrSliceType $ typeOf' range then
-    ForStmt x (Just undefined) (Just undefined) (Just undefined) undefined
-  else
-    stmt
-
-  -- ForStmt :: a
-  --         -> Maybe (f Stmt) -- ^ initialization statement; or nil
-  --         -> Maybe (f Expr) -- ^ condition; or nil
-  --         -> Maybe (f Stmt) -- ^ post iteration statement; or nil
-  --         -> f Block -- ^ loop body
-  --         -> NodeF a f Stmt
-
-  -- RangeStmt :: a
-  --           -> Maybe (f Expr) -- ^ key
-  --           -> Maybe (f Expr) -- ^ value
-  --           -> f Expr -- ^ value to range over
-  --           -> f Block -- ^ body
-  --           -> Bool -- ^ is assign?
-  --           -> NodeF a f Stmt
+  if isArrayOrSliceType (typeOf' range) || isStringType (typeOf' range) then
+    ForStmt x (Just $ ini) (Just $ cond range) Nothing $ In $ BlockNode $ body' range
+  else case typeOf' range of
+    PointerType arr_tp@(ArrayType _len _tp) ->
+      let deref = In $ StarExpr x arr_tp range in
+        ForStmt x (Just $ ini) (Just $ cond deref) Nothing $
+        In $ BlockNode $ body' deref
+    _tp -> stmt
+  where
+    assign_op = if is_assign then Assign else Define
+    -- Generate variable name not appearing in the body. For now we
+    -- use a fixed identifier that is illegal in Go. Nested 'range'
+    -- loops will reuse the same variable but it should be fine
+    -- because it only needs to be in scope for the first two
+    -- statements of the body (which we generate).
+    ix = In $ IdentExpr x (intType Nothing) Nothing $ Ident IdentVar "?i"
+    -- Initialize index variable with 0.
+    ini = In $ AssignStmt x Define Nothing [ix]
+      [In $ BasicConstExpr x (intType Nothing) $ BasicConstInt 0]
+    cond e = In $ BinaryExpr x boolType ix BLt $
+      In $ CallExpr x (intType Nothing) False
+      (In $ IdentExpr x NoType Nothing $ Ident IdentFunc "len")
+      [e]
+    body' e =
+      maybe [] (\k -> [In $ AssignStmt x assign_op Nothing [k] [ix]]) key ++
+      maybe [] (\v -> [In $ AssignStmt x assign_op Nothing [v]
+                        [In $ IndexExpr x (typeOf' v) e ix]]) value ++ body
 
 -- | Do nothing for all other nodes.
 desugar_alg n = return $ In n
@@ -162,6 +200,7 @@ unpack_tuple args = args
 
 -- | Given a default return expression, ensure that a list of
 -- statements terminates with a return statement.
+-- TODO: fix naked returns
 insert_returns :: a -> Node a Expr -> [Node a Stmt] -> [Node a Stmt]
 -- Replace empty body with a return.
 insert_returns x e [] = [In $ ReturnStmt x [e]]
@@ -169,7 +208,9 @@ insert_returns x e [] = [In $ ReturnStmt x [e]]
 -- 1) our function has no returns so es = [] and this has no effect.
 -- 2) our function has named returns and this is "naked return", so we
 -- fill in the return identifiers.
-insert_returns _x e [In (ReturnStmt y [])] = [In $ ReturnStmt y [e]]
+-- insert_returns _x e [In (ReturnStmt y [])] = [In $ ReturnStmt y [e]]
+insert_returns _x e [In (ReturnStmt y [In (TupleExpr _y _tp [])])] =
+  [In $ ReturnStmt y [e]]
 -- If there's already a nonempty return statement, leave it alone.
 insert_returns _x _e stmts@[In (ReturnStmt _ _)] = stmts
 -- If the last statement is not a return, insert one after.
@@ -177,9 +218,13 @@ insert_returns x e [stmt] = [stmt, In $ ReturnStmt x [e]]
 -- Recurse to get to the last statement.
 insert_returns x e (stmt:stmts) = stmt : insert_returns x e stmts
 
+-- field_names :: a -> [Node a Field] -> [Node a Expr]
+-- field_names x = map $ \(In (FieldNode [nm] tp _)) ->
+--   In $ IdentExpr x (typeOf' tp) Nothing nm
+
 field_names :: a -> [Node a Field] -> [Node a Expr]
-field_names x = map $ \(In (FieldNode [nm] tp _)) ->
-  In $ IdentExpr x (typeOf' tp) Nothing nm
+field_names x = concatMap $ \(In (FieldNode nms tp _)) ->
+  (In . IdentExpr x (typeOf' tp) Nothing) <$> nms
 
 mkTuple :: a -> [Node a Expr] -> Node a Expr
 mkTuple x es = In $ TupleExpr x (TupleType $ typeToNameType . typeOf' <$> es) es

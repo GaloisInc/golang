@@ -36,7 +36,7 @@ cata' phi = getConst . cata (Const . phi)
 cataM :: (TraversableFC f, Monad m)
       => (forall i. f a i -> m (a i))
       -> (forall i. Fix f i -> m (a i))
-cataM phi (In node) = traverseFC (cataM phi) node >>= phi
+cataM phi (In x) = traverseFC (cataM phi) x >>= phi
 
 cataM' :: (TraversableFC f, Monad m)
        => (forall i. f (Const a) i -> m a)
@@ -51,7 +51,7 @@ para phi = phi . fmapFC (\x -> Pair x (para phi x)) . out
 paraM :: (TraversableFC f, Monad m)
       => (forall i. f (Product (Fix f) a) i -> m (a i))
       -> (forall i. Fix f i -> m (a i))
-paraM phi (In node) = traverseFC (\x -> Pair x <$> paraM phi x) node >>= phi
+paraM phi (In x) = traverseFC (\y -> Pair y <$> paraM phi y) x >>= phi
 
 ----------------------------------------------------------------------
 -- Utility functions
