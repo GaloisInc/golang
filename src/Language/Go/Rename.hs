@@ -83,7 +83,7 @@ rename_alg (AssignStmt x assign_type op lhs rhs) = RM $ do
     Define -> do
       forM_ lhs $ \(Pair node _rm) -> case node of
         In (IdentExpr _x _tp _q (Ident _k name)) -> addLocal name
-        _node -> fail "rename_alg AssignStmt: expected ident in LHS"
+        _node -> error "rename_alg AssignStmt: expected ident in LHS"
     _ -> return ()
   In <$> (AssignStmt x assign_type op <$> mapM run lhs <*> mapM run rhs)
 
