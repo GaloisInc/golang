@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 {-|
 Module      : Language.Go.Parser
 Description : JSON AST deserializer
@@ -15,7 +16,6 @@ module Language.Go.Parser (parseMain, SourcePos) where
 
 import           Data.Aeson
 import           Data.ByteString.Lazy (ByteString)
-import qualified Data.HashMap.Strict as HM
 import           Data.Text
 
 import           Language.Go.AST
@@ -196,15 +196,16 @@ instance FromJSON (N Expr) where
             SelectorExpr pos go_tp <$> v .: "target" <*> v .: "field"
           "type-assert" ->
             TypeAssertExpr pos go_tp <$> v .: "target" <*> v .:? "asserted"
-          "identifier" -> case HM.lookup "value" v of
-            Just (Object v') -> case HM.lookup "type" v' of
-              -- Special case for IOTA: whenever the type is "IOTA"
-              -- the value should be "IOTA" as well.
-              Just "IOTA" ->
-                return $ IdentExpr pos go_tp Nothing $
-                          Ident T.IdentNoKind "IOTA"
+          "identifier" -> do
+            v' <- v .: "value"
+            mAsIOTA <- v' .:? "type"
+
+            -- Special case for IOTA: whenever the type is "IOTA"
+            -- the value should be "IOTA" as well.
+            case mAsIOTA of
+              Just ("IOTA" :: Text) -> return $ IdentExpr pos go_tp Nothing $
+                               Ident T.IdentNoKind "IOTA"
               _ -> IdentExpr pos go_tp <$> v .:? "qualifier" <*> v .: "value"
-            _ -> fail ""
           "slice" ->
             SliceExpr pos go_tp <$> v .: "target" <*>
             v .: "low" <*> v .: "high" <*> v .: "max" <*> v .: "three"
