@@ -37,7 +37,7 @@ library
   build-depends:       base == 4.*
                      , mtl
                      , text >= 1.2
-                     , aeson
+                     , aeson < 2.0
                      , bytestring
                      , vector
                      , unordered-containers
