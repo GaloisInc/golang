@@ -1,4 +1,3 @@
-{-# LANGUAGE ScopedTypeVariables #-}
 {-|
 Module      : Language.Go.Parser
 Description : JSON AST deserializer
@@ -11,12 +10,13 @@ Parse JSON-encoded Go ASTs.
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE UndecidableInstances #-}
 module Language.Go.Parser (parseMain, SourcePos) where
 
 import           Data.Aeson
 import           Data.ByteString.Lazy (ByteString)
-import           Data.Text
+import           Data.Text (Text)
 
 import           Language.Go.AST
 import           Language.Go.Rec
