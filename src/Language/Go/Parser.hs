@@ -6,6 +6,7 @@ Stability   : experimental
 
 Parse JSON-encoded Go ASTs.
 -}
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE KindSignatures #-}
@@ -15,8 +16,14 @@ module Language.Go.Parser (parseMain, SourcePos) where
 
 import           Data.Aeson
 import           Data.ByteString.Lazy (ByteString)
-import qualified Data.HashMap.Strict as HM
 import           Data.Text
+
+#if MIN_VERSION_aeson(2,0,0)
+import           Data.Aeson.Key (Key)
+import qualified Data.Aeson.KeyMap as KM
+#else
+import qualified Data.HashMap.Lazy as HML
+#endif
 
 import           Language.Go.AST
 import           Language.Go.Rec
@@ -196,8 +203,8 @@ instance FromJSON (N Expr) where
             SelectorExpr pos go_tp <$> v .: "target" <*> v .: "field"
           "type-assert" ->
             TypeAssertExpr pos go_tp <$> v .: "target" <*> v .:? "asserted"
-          "identifier" -> case HM.lookup "value" v of
-            Just (Object v') -> case HM.lookup "type" v' of
+          "identifier" -> case lookupKM "value" v of
+            Just (Object v') -> case lookupKM "type" v' of
               -- Special case for IOTA: whenever the type is "IOTA"
               -- the value should be "IOTA" as well.
               Just "IOTA" ->
@@ -364,3 +371,12 @@ instance FromJSON T.Type where
       "Struct" -> T.StructType <$> v .: "fields"
       "Tuple" -> T.TupleType <$> v .: "fields"
       _ -> fail $ "FromJSON Type: unknown type " ++ show v
+
+-- TODO: When the ecosystem widely uses aeson-2.0.0.0 or later, remove this CPP.
+#if MIN_VERSION_aeson(2,0,0)
+lookupKM :: Key -> KM.KeyMap Value -> Maybe Value
+lookupKM = KM.lookup
+#else
+lookupKM :: Text -> HML.HashMap Text Value -> Maybe Value
+lookupKM = HML.lookup
+#endif
