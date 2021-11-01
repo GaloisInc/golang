@@ -19,7 +19,7 @@ import           Control.Monad.State
 import           Data.Default.Class
 import           Data.Functor.Product
 import           Data.List (nub)
-import           Data.Text hiding (inits)
+import           Data.Text (Text)
 
 import           Data.Parameterized.TraversableFC
 
