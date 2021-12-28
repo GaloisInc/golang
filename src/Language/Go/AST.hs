@@ -28,6 +28,7 @@ constant expressions (most literals end up as BasicConstExprs).
 {-# LANGUAGE StandaloneDeriving #-}
 module Language.Go.AST where
 
+import qualified Data.Kind as Kind
 import           Data.Text hiding (inits, replicate)
 
 import           Data.Parameterized.TraversableFC
@@ -42,7 +43,7 @@ import           Language.Go.Types
 type Node a = Fix (NodeF a)
 
 -- | Go AST node functor indexed by NodeType.
-data NodeF (a :: *) (f :: NodeType -> *) (i :: NodeType) where
+data NodeF (a :: Kind.Type) (f :: NodeType -> Kind.Type) (i :: NodeType) where
 
   -- | The main package.
   MainNode :: Text -- ^ main package name
@@ -194,7 +195,7 @@ data NodeF (a :: *) (f :: NodeType -> *) (i :: NodeType) where
   ----------------------------------------------------------------------
   -- Expressions
 
-  -- | A literal of basic type. 
+  -- | A literal of basic type.
   BasicLitExpr :: a -> Type -> BasicLit -> NodeF a f Expr
 
   -- | A constant value produced by the Go typechecker's constant
@@ -454,7 +455,7 @@ data BasicLitType =
   | LiteralString
   deriving (Eq, Show)
 
--- | A literal of basic type. 
+-- | A literal of basic type.
 data BasicLit =
   BasicLit
   { basiclit_type :: BasicLitType -- ^ "kind" of the literal
@@ -748,7 +749,7 @@ complexConst x w real imag =
 
 stringConst :: a -> Text -> Node a Expr
 stringConst x str = In $ BasicConstExpr x stringType $ BasicConstString str
-  
+
 -- | Zero value expressions for every type.
 zeroExpr :: a -> Type -> Node a Expr
 zeroExpr x NoType = error "zeroExpr: NoType"
