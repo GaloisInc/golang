@@ -752,7 +752,7 @@ stringConst x str = In $ BasicConstExpr x stringType $ BasicConstString str
 
 -- | Zero value expressions for every type.
 zeroExpr :: a -> Type -> Node a Expr
-zeroExpr x NoType = error "zeroExpr: NoType"
+zeroExpr _ NoType = error "zeroExpr: NoType"
 zeroExpr x (ArrayType len tp) = zeroArray x len tp
 zeroExpr x (BasicType basicKind) = zeroBasic x basicKind
 zeroExpr x tp@(ChanType _dir _tp) = In $ NilExpr x tp
@@ -762,11 +762,11 @@ zeroExpr x (NamedType tp) = zeroExpr x tp
 zeroExpr x tp@(PointerType _tp) = In $ NilExpr x tp
 zeroExpr x tp@(FuncType _recv _params _return _variadic) = In $ NilExpr x tp
 zeroExpr x tp@(SliceType _tp) = In $ NilExpr x tp
-zeroExpr x (StructType fields) = error "zeroExpr: struct not yet supported"
+zeroExpr _ (StructType _fields) = error "zeroExpr: struct not yet supported"
 zeroExpr x (TupleType fields) = zeroTuple x fields
 
 zeroBasic :: a -> BasicKind -> Node a Expr
-zeroBasic x BasicInvalid = error ""
+zeroBasic _ BasicInvalid = error ""
 zeroBasic x BasicBool = boolConst x False
 zeroBasic x (BasicInt w) = intConst x w 0
 zeroBasic x (BasicUInt w) = uintConst x w 0
