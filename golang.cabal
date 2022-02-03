@@ -21,7 +21,7 @@ license-file:        LICENSE
 author:              Alex Bagnall
 maintainer:          Alex Bagnall <abagnall@galois.com>, Tristan Ravitch <tristan@galois.com>
 copyright:           (c) 2020-2021 Galois Inc.
-tested-with:         GHC==8.6.5, GHC==8.8.4, GHC==8.10.4, GHC==9.0.2
+tested-with:         GHC==8.6.5, GHC==8.8.4, GHC==8.10.7, GHC==9.0.2, GHC==9.2.2
 homepage:            https://github.com/GaloisInc/golang
 bug-reports:         https://github.com/GaloisInc/golang/issues
 category:            Language
