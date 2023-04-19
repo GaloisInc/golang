@@ -13,8 +13,9 @@ every global becomes fully qualified.
 {-# LANGUAGE OverloadedStrings #-}
 module Language.Go.Rename (rename) where
 
-import           Control.Monad.Identity
-import           Control.Monad.State
+import           Control.Monad (forM_)
+import           Control.Monad.Identity (Identity(..))
+import           Control.Monad.State (StateT, evalStateT, gets, modify)
 
 import           Data.Default.Class
 import           Data.Functor.Product
