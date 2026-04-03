@@ -12,7 +12,7 @@ may appear in the syntax of a program.
 {-# LANGUAGE PolyKinds #-}
 module Language.Go.Types where
 
-import           Data.Text
+import           Data.Text (Text)
 
 -- | Type indices for Go AST nodes.
 data NodeType = Main | Package | File | Stmt | Expr

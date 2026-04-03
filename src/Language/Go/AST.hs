@@ -29,7 +29,7 @@ constant expressions (most literals end up as BasicConstExprs).
 module Language.Go.AST where
 
 import qualified Data.Kind as Kind
-import           Data.Text hiding (inits, replicate)
+import           Data.Text (Text)
 
 import           Data.Parameterized.TraversableFC
 
