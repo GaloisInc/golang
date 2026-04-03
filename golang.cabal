@@ -30,11 +30,11 @@ cabal-version:       >=1.10
 
 Source-repository head
    type: git
-   location: git://github.com/GaloisInc/golang
+   location: https://github.com/GaloisInc/golang
 
 Source-repository this
    type: git
-   location: git://github.com/GaloisInc/golang
+   location: https://github.com/GaloisInc/golang
    tag: 0.1.0.0
 
 library
